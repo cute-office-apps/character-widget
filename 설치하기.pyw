@@ -11,7 +11,10 @@ from ctypes import POINTER, WINFUNCTYPE, byref, c_int, c_void_p, c_wchar_p, wint
 import tkinter as tk
 from tkinter import messagebox
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# "파이썬 포함판"에서는 설치하기.exe 가 이 파일을 실행하면서 CW_BUNDLE_ROOT 에 압축 푼 폴더를 알려줘요.
+BUNDLE_ROOT = os.environ.get("CW_BUNDLE_ROOT", "")
+HERE = BUNDLE_ROOT or os.path.dirname(os.path.abspath(__file__))
+BUNDLED = bool(BUNDLE_ROOT) and os.path.isdir(os.path.join(BUNDLE_ROOT, "runtime"))
 SRC = os.path.join(HERE, "app")
 APP_TITLE = "캐릭터 위젯"
 RUN_NAME = "DesktopBuddyWidget"            # same name the widget uses for "자동 실행"
@@ -37,9 +40,12 @@ DEST = os.path.join(LOCAL, "CharacterWidget")
 DESKTOP = special_folder(0x10) or os.path.join(os.path.expanduser("~"), "Desktop")
 PROGRAMS = special_folder(0x02)
 LNK_NAME = APP_TITLE + ".lnk"
+PY_DIR = os.path.join(DEST, "python")       # bundled Python is copied here (파이썬 포함판)
 
 
 def pythonw():
+    if BUNDLED:
+        return os.path.join(PY_DIR, "pythonw.exe")
     exe = sys.executable or ""
     cands = []
     if exe and "\\program files\\windowsapps\\" not in exe.lower():
@@ -142,8 +148,42 @@ def copy_app():
     return copied
 
 
+def _same(a, b):
+    try:
+        sa, sb = os.stat(a), os.stat(b)
+    except OSError:
+        return False
+    return sa.st_size == sb.st_size and int(sa.st_mtime) == int(sb.st_mtime)
+
+
+def _copy(src, dst):
+    if _same(src, dst):
+        return                                      # unchanged -> no need to touch files that may be in use
+    try:
+        shutil.copy2(src, dst)
+    except PermissionError:
+        raise OSError("켜져 있는 위젯을 먼저 꺼 주세요. (캐릭터 우클릭 → 끄기)")
+
+
+def copy_runtime():
+    """파이썬 포함판: 함께 들어 있는 Python 을 설치 폴더 안 python\\ 으로 복사해요."""
+    os.makedirs(PY_DIR, exist_ok=True)
+    _copy(sys.executable, os.path.join(PY_DIR, "pythonw.exe"))     # 설치하기.exe = 공식 pythonw.exe
+    for f in os.listdir(BUNDLE_ROOT):
+        if f.lower().endswith((".dll", "._pth")):
+            _copy(os.path.join(BUNDLE_ROOT, f), os.path.join(PY_DIR, f))
+    src = os.path.join(BUNDLE_ROOT, "runtime")
+    for root, dirs, files in os.walk(src):
+        out_dir = os.path.normpath(os.path.join(PY_DIR, "runtime", os.path.relpath(root, src)))
+        os.makedirs(out_dir, exist_ok=True)
+        for f in files:
+            _copy(os.path.join(root, f), os.path.join(out_dir, f))
+
+
 def install(desktop, startmenu, autostart):
     copy_app()
+    if BUNDLED:
+        copy_runtime()
     exe = pythonw()
     script = os.path.join(DEST, "start_widget.pyw")
     icon = os.path.join(DEST, "icon.ico")
@@ -232,7 +272,7 @@ class Installer:
         self.title("%s %s" % (APP_TITLE, "업데이트" if installed else "설치"),
                    "바탕화면에 캐릭터가 떠 있다가, 클릭하면 메모가 열리고\n"
                    "구글 캘린더 일정을 알려주는 위젯이에요.")
-        if sys.version_info < (3, 8):
+        if not BUNDLED and sys.version_info < (3, 8):
             tk.Label(self.body, text="Python 3.8 이상이 필요해요. Microsoft Store에서 Python을 설치해 주세요.",
                      bg=BG, fg="#c0504d", font=("Malgun Gothic", 9)).pack(anchor="w")
         self.v_desk = tk.BooleanVar(value=True)

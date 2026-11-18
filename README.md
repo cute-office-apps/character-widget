@@ -9,9 +9,20 @@
 
 ## 내려받기
 
-**[CharacterWidget_v1.0.zip 내려받기](https://github.com/ckgpdud/character-widget/raw/main/CharacterWidget_v1.0.zip)**
+**[간편판 내려받기 (Python 설치 필요 없음, 추천)](https://github.com/ckgpdud/character-widget/raw/main/CharacterWidget_v1.0_Easy.zip)** · 약 14MB
 
-## 설치 방법
+[기본판 내려받기 (Python을 직접 설치해서 쓰는 버전)](https://github.com/ckgpdud/character-widget/raw/main/CharacterWidget_v1.0.zip) · 약 0.2MB
+
+## 설치 방법 (간편판)
+
+1. 받은 zip 파일을 우클릭 → **압축 풀기** (꼭 먼저 풀어 주세요)
+2. 풀린 폴더 안의 **설치하기**를 더블클릭 → [설치하기] → [지금 실행하기]
+   (파랑·노랑 뱀 모양 아이콘이에요. 공식 Python 프로그램이라 이 모양이에요.)
+3. 바탕화면에 "캐릭터 위젯" 바로가기가 생겨요. 다음부터는 이걸 누르면 돼요.
+
+간편판에는 [python.org](https://www.python.org)의 공식 Python이 고치지 않은 그대로 들어 있어요.
+
+## 설치 방법 (기본판)
 
 1. **Python 설치 (처음 한 번)**
    시작 메뉴 → Microsoft Store → "Python 3.13" 검색 → 개발사 "Python Software Foundation" 확인 → 받기
