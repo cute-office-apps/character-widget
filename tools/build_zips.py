@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""'파이썬 포함판' zip 만들기.
+"""배포용 zip 두 개 만들기.
 
-python.org 의 공식 파일(설치 없이 쓰는 Python + tkinter 부품)을 내려받아
-위젯과 함께 묶어요. 공식 파일은 하나도 고치지 않아요 (서명이 그대로 유지돼요).
+- 간편판 (CharacterWidget_v1.0_Easy.zip): python.org 의 공식 파일(설치 없이 쓰는 Python +
+  tkinter 부품)을 내려받아 위젯과 함께 묶어요. 공식 파일은 하나도 고치지 않아요 (서명 유지).
+- 기본판 (CharacterWidget_v1.0.zip): 위젯만 묶어요. 받는 사람이 Python 을 직접 설치해요.
 
-사용법 (Linux, msitools 필요):  python3 tools/build_easy.py
-결과: CharacterWidget_v1.0_Easy.zip
+사용법 (Linux, msitools 필요):  python3 tools/build_zips.py
 """
 import os
 import shutil
@@ -17,6 +17,7 @@ import zipfile
 
 PY_VER = "3.12.10"
 OUT_NAME = "CharacterWidget_v1.0_Easy.zip"
+PLAIN_NAME = "CharacterWidget_v1.0.zip"
 TOP = "캐릭터위젯"
 BASE = "https://www.python.org/ftp/python/%s/" % PY_VER
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,7 +49,32 @@ def copy_tree(src, dst, skip_dirs=()):
             shutil.copy2(os.path.join(root, f), os.path.join(out, f))
 
 
+def zip_dir(stage, out):
+    if os.path.exists(out):
+        os.remove(out)
+    base = os.path.dirname(stage)
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for root, dirs, files in os.walk(stage):
+            dirs.sort()
+            for f in sorted(files):
+                p = os.path.join(root, f)
+                z.write(p, os.path.relpath(p, base))
+    print("made", out, os.path.getsize(out) // 1024, "KB")
+
+
+def build_plain():
+    work = tempfile.mkdtemp()
+    stage = os.path.join(work, TOP)
+    os.makedirs(stage)
+    shutil.copy2(os.path.join(REPO, "설치하기.pyw"), os.path.join(stage, "설치하기.pyw"))
+    shutil.copy2(os.path.join(REPO, "사용설명서.txt"), os.path.join(stage, "사용설명서.txt"))
+    copy_tree(os.path.join(REPO, "app"), os.path.join(stage, "app"))
+    zip_dir(stage, os.path.join(REPO, PLAIN_NAME))
+    shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
+    build_plain()
     work = tempfile.mkdtemp()
     stage = os.path.join(work, "stage", TOP)
     rt = os.path.join(stage, "runtime")
@@ -94,18 +120,8 @@ def main():
     shutil.copy2(os.path.join(REPO, "bundle", "사용설명서.txt"), os.path.join(stage, "사용설명서.txt"))
 
     # 5) zip 으로 묶기
-    out = os.path.join(REPO, OUT_NAME)
-    if os.path.exists(out):
-        os.remove(out)
-    base = os.path.dirname(stage)
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for root, dirs, files in os.walk(stage):
-            dirs.sort()
-            for f in sorted(files):
-                p = os.path.join(root, f)
-                z.write(p, os.path.relpath(p, base))
+    zip_dir(stage, os.path.join(REPO, OUT_NAME))
     shutil.rmtree(work, ignore_errors=True)
-    print("made", out, os.path.getsize(out) // 1024, "KB")
 
 
 if __name__ == "__main__":

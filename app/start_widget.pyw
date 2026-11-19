@@ -1699,7 +1699,7 @@ class CuteMenu:
                  ("help", "사용법 보기", app.start_tour)]
         head_h, row_h, tog_h, foot_h = 52, 36, 40, 52
         W = self.W
-        H = head_h + 6 + len(items) * row_h + 8 + tog_h + foot_h
+        H = head_h + 6 + len(items) * row_h + 8 + tog_h * 2 + foot_h
         c = self.c = tk.Canvas(top, width=W, height=H, bg=KEY, highlightthickness=0, bd=0)
         c.pack()
         round_rect(c, 2, 2, W - 3, H - 3, 18, fill=self.BG, outline=LINE, width=2)
@@ -1720,17 +1720,11 @@ class CuteMenu:
             y += row_h
         c.create_line(16, y + 4, W - 16, y + 4, fill="#e6d6bf", dash=(3, 3))
         y += 8
-        # autostart switch
-        self.ty = y
-        tag = "tog"
-        self.tog_bg = round_rect(c, 8, y + 2, W - 8, y + tog_h - 4, 10, fill=self.BG, outline="", tags=(tag,))
-        c.create_text(20, y + tog_h // 2 - 1, text="컴퓨터 켤 때 자동 실행", anchor="w",
-                      font=("Malgun Gothic", 9), fill=TEXT, tags=(tag,))
-        self.switch_items = []
-        self.draw_switch()
-        c.tag_bind(tag, "<Enter>", lambda e: c.itemconfig(self.tog_bg, fill=self.HOV))
-        c.tag_bind(tag, "<Leave>", lambda e: c.itemconfig(self.tog_bg, fill=self.BG))
-        c.tag_bind(tag, "<Button-1>", lambda e: self.toggle_autostart())
+        # on/off switches
+        self.switches = {}
+        self.toggle_row("tog_rand", y, tog_h, "캐릭터 랜덤으로 바꾸기", app.random_on, self.toggle_random)
+        y += tog_h
+        self.toggle_row("tog", y, tog_h, "컴퓨터 켤 때 자동 실행", autostart_enabled, self.toggle_autostart)
         y += tog_h
         # footer buttons
         half = (W - 16 * 2 - 8) // 2
@@ -1783,21 +1777,40 @@ class CuteMenu:
         c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill=fill), c.config(cursor="")))
         c.tag_bind(tag, "<Button-1>", lambda e: self.run(cmd))
 
-    def draw_switch(self):
+    def toggle_row(self, tag, y, h, label, is_on, on_click):
         c = self.c
-        for it in self.switch_items:
+        bg = round_rect(c, 8, y + 2, self.W - 8, y + h - 4, 10, fill=self.BG, outline="", tags=(tag,))
+        c.create_text(20, y + h // 2 - 1, text=label, anchor="w",
+                      font=("Malgun Gothic", 9), fill=TEXT, tags=(tag,))
+        self.switches[tag] = {"y": y, "is_on": is_on, "items": []}
+        self.draw_switch(tag)
+        c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
+        c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill=self.BG), c.config(cursor="")))
+        c.tag_bind(tag, "<Button-1>", lambda e: on_click())
+
+    def draw_switch(self, tag="tog"):
+        c, sw = self.c, self.switches[tag]
+        for it in sw["items"]:
             c.delete(it)
-        on = autostart_enabled()
-        x1, y1 = self.W - 62, self.ty + 10
+        try:
+            on = bool(sw["is_on"]())
+        except Exception:
+            on = False
+        x1, y1 = self.W - 62, sw["y"] + 10
         pill = round_rect(c, x1, y1, x1 + 40, y1 + 20, 10, fill="#9fd8b0" if on else "#e2d9cc",
-                          outline="#d0c2ad", width=1, tags=("tog",))
+                          outline="#d0c2ad", width=1, tags=(tag,))
         kx = x1 + 30 if on else x1 + 10
-        knob = c.create_oval(kx - 8, y1 + 2, kx + 8, y1 + 18, fill="white", outline="#d0c2ad", tags=("tog",))
-        self.switch_items = [pill, knob]
+        knob = c.create_oval(kx - 8, y1 + 2, kx + 8, y1 + 18, fill="white", outline="#d0c2ad", tags=(tag,))
+        sw["items"] = [pill, knob]
 
     def toggle_autostart(self):
         self.app.set_autostart_on(not autostart_enabled())
-        self.draw_switch()
+        self.draw_switch("tog")
+
+    def toggle_random(self):
+        self.app.set_random_on(not self.app.random_on())
+        if self.alive:
+            self.draw_switch("tog_rand")
 
     def run(self, cmd):
         self.close()
@@ -2081,6 +2094,8 @@ class App:
         if self.placeholder:
             self.char_key, self.char = None, None
         want = read_choice() if keys else ""
+        if len(keys) > 1 and load_state().get("random_char"):      # 랜덤 바꾸기: 켤 때마다 다른 친구
+            want = random.choice([k for k in keys if k != want] or keys)
         if keys:
             self.char_key = want if want in keys else (DEFAULT_CHAR if DEFAULT_CHAR in keys else keys[0])
             try:
@@ -2127,6 +2142,8 @@ class App:
         _d = self.dec_for(self.char_key)
         self.cur_sig = decor_sig(_d) + "/" + str((_d or {}).get("effect"))
         self.root.after(10 * 60 * 1000, self.season_check)
+        self.next_random = time.time() + self.random_minutes() * 60
+        r.after(60 * 1000, self.random_tick)
         self.animate()
         r.after(2500, lambda: self.refresh(True))
         r.after(30000, self.tick)
@@ -2484,6 +2501,45 @@ class App:
 
     def toggle_autostart(self):
         self.set_autostart_on(self.autostart.get())
+
+    # ---------- random character
+    def random_on(self):
+        return bool(self.state.get("random_char"))
+
+    def random_minutes(self):
+        return max(1, self.int_cfg("RANDOM_MINUTES", 30))
+
+    def set_random_on(self, want):
+        if want and len(list_characters()) < 2:
+            self.say("캐릭터가 2개 이상 있어야\n랜덤으로 바꿀 수 있어!\n(메뉴 → 캐릭터 바꾸기 → +)", 8, False)
+            return
+        self.state["random_char"] = bool(want)
+        save_state(self.state)
+        if want:
+            self.random_switch()
+            self.say("이제 %d분마다 다른 친구로 바뀔게!" % self.random_minutes(), 5, False)
+        else:
+            self.next_random = time.time() + self.random_minutes() * 60
+            self.say("랜덤 바꾸기를 껐어!", 4, False)
+
+    def random_switch(self):
+        self.next_random = time.time() + self.random_minutes() * 60
+        if self.placeholder:
+            return False
+        if (self.picker and self.picker.alive) or (self.decor_win and self.decor_win.alive):
+            return False                                    # 바꾸기·꾸미기 창을 쓰는 중이면 기다려요
+        others = [k for k in list_characters() if k != self.char_key]
+        if not others:
+            return False
+        return self.set_character(random.choice(others)) is True
+
+    def random_tick(self):
+        try:
+            if self.random_on() and time.time() >= self.next_random:
+                self.random_switch()
+        except Exception as ex:
+            log("random: %s" % ex)
+        self.root.after(60 * 1000, self.random_tick)
 
     def open_settings_window(self):
         if self.settings_win and self.settings_win.alive:
