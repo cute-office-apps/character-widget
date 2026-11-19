@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -189,6 +190,9 @@ CHOICE_FILE = os.path.join(DIR, "character_choice.txt")
 BUILTIN = "__builtin__"
 BUILTIN_NAME = "기본 캐릭터"
 IMG_EXT = (".png", ".gif")
+MAC_IMPORT_EXT = (".jpg", ".jpeg", ".heic", ".heif", ".webp", ".avif", ".bmp", ".tif", ".tiff")
+IMPORT_EXT = IMG_EXT + MAC_IMPORT_EXT if MAC else IMG_EXT
+IMAGE_FILETYPES = [("그림 파일", tuple("*" + ext for ext in IMPORT_EXT)), ("PNG", "*.png"), ("GIF", "*.gif")]
 UI_DIR = os.path.join(ASSET_DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
@@ -428,6 +432,85 @@ def accessory_path(item):
     if os.path.isfile(path):
         return path
     return os.path.join(ACC_DIR, item)
+
+
+def convert_image_to_png(source, directory):
+    # Use the macOS decoder and apply EXIF orientation before handing the PNG to Tk.
+    script = """
+const image = sips.images[0];
+if (!image) throw new Error("Cannot read image");
+const { width, height } = image.size;
+if (!(width > 0 && height > 0)) throw new Error("Cannot read image dimensions");
+const orientation = image.getProperty("Orientation") || 1;
+const rotated = orientation >= 5 && orientation <= 8;
+const canvas = new Canvas(rotated ? height : width, rotated ? width : height);
+const context = canvas.getContext("2d");
+const transforms = {
+    2: [-1, 0, 0, 1, width, 0],
+    3: [-1, 0, 0, -1, width, height],
+    4: [1, 0, 0, -1, 0, height],
+    5: [0, 1, 1, 0, 0, 0],
+    6: [0, 1, -1, 0, height, 0],
+    7: [0, -1, -1, 0, height, width],
+    8: [0, -1, 1, 0, 0, width],
+};
+if (transforms[orientation]) context.transform(...transforms[orientation]);
+context.drawImage(image, 0, 0);
+new Output(context, "image.png", "public.png").addToQueue();
+"""
+    script_path = os.path.join(directory, "convert.js")
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(script)
+    subprocess.run(
+        ["/usr/bin/sips", "--js", script_path, os.path.abspath(source), "--out", directory],
+        capture_output=True, check=True, timeout=30,
+    )
+    return os.path.join(directory, "image.png")
+
+
+def import_images(paths, folder, fallback_name):
+    """Store images as PNG or GIF after Tk can load them."""
+    os.makedirs(folder, exist_ok=True)
+    added, bad = None, []
+    for source in paths:
+        base = os.path.basename(source)
+        stem, ext = os.path.splitext(base)
+        ext = ext.lower()
+        if ext not in IMPORT_EXT:
+            bad.append(base)
+            continue
+
+        stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or fallback_name
+        output_ext = ext if ext in IMG_EXT else ".png"
+        name, number = stem + output_ext, 2
+        while os.path.exists(accessory_path(name) if folder == ACC_DIR else os.path.join(folder, name)):
+            name = "%s (%d)%s" % (stem, number, output_ext)
+            number += 1
+
+        try:
+            with tempfile.TemporaryDirectory(dir=folder) as tmp:
+                if ext in IMG_EXT:
+                    image = os.path.join(tmp, name)
+                    shutil.copyfile(source, image)
+                else:
+                    image = convert_image_to_png(source, tmp)
+                tk.PhotoImage(file=image)
+                os.replace(image, os.path.join(folder, name))
+            added = name
+        except Exception as ex:
+            log("import image %s: %s" % (base, ex))
+            bad.append(base)
+    return added, bad
+
+
+def show_import_failures(parent, title, bad):
+    if MAC:
+        help_text = ("PNG, GIF, JPG, HEIC, HEIF, WebP, AVIF, BMP, TIFF를 가져올 수 있어요.\n"
+                     "지원 형식인데 열리지 않으면 미리보기 앱에서 먼저 열어 보세요.")
+    else:
+        help_text = ("PNG 또는 GIF 그림만 쓸 수 있어요.\n"
+                     "JPG는 그림판에서 열고 '다른 이름으로 저장 → PNG'로 바꿔 주세요.")
+    messagebox.showwarning(title, "이 그림은 추가하지 못했어요.\n" + "\n".join(bad) + "\n\n" + help_text, parent=parent)
 
 
 def custom_accessories():
@@ -1172,41 +1255,12 @@ class Picker:
     def add(self):
         paths = filedialog.askopenfilenames(
             parent=self.top, title="캐릭터 그림 고르기 (배경이 투명한 PNG 추천)",
-            filetypes=[("그림 파일 (PNG, GIF)", "*.png *.gif"), ("PNG", "*.png"), ("GIF", "*.gif")])
+            filetypes=IMAGE_FILETYPES)
         if not paths:
             return
-        os.makedirs(CHAR_DIR, exist_ok=True)
-        added, bad = None, []
-        for p in paths:
-            base = os.path.basename(p)
-            stem, ext = os.path.splitext(base)
-            ext = ext.lower()
-            if ext not in IMG_EXT:
-                bad.append(base)
-                continue
-            stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "character"
-            dest, n = os.path.join(CHAR_DIR, stem + ext), 2
-            while os.path.exists(dest):
-                dest = os.path.join(CHAR_DIR, "%s (%d)%s" % (stem, n, ext))
-                n += 1
-            try:
-                shutil.copyfile(p, dest)
-                tk.PhotoImage(file=dest)          # make sure Tk can read it
-                added = os.path.basename(dest)
-            except Exception as ex:
-                log("add character %s: %s" % (base, ex))
-                bad.append(base)
-                try:
-                    os.remove(dest)
-                except Exception:
-                    pass
+        added, bad = import_images(paths, CHAR_DIR, "character")
         if bad:
-            converter = "미리보기에서 열고 '파일 → 내보내기 → PNG'" if MAC else "그림판에서 열고 '다른 이름으로 저장 → PNG'"
-            messagebox.showwarning("캐릭터 변경",
-                                   "이 그림은 추가하지 못했어요:\n" + "\n".join(bad) +
-                                   "\n\nPNG 또는 GIF 그림만 쓸 수 있어요.\n"
-                                   f"JPG는 {converter}로 바꿔 주세요.",
-                                   parent=self.top)
+            show_import_failures(self.top, "캐릭터 변경", bad)
         if added:
             self.build()
             self.ask_name(added, "이름 짓기",
@@ -1618,31 +1672,12 @@ class DecorWindow:
     def add(self):
         paths = filedialog.askopenfilenames(
             parent=self.top, title="소품 그림 고르기 (배경이 투명한 PNG 추천)",
-            filetypes=[("그림 파일 (PNG, GIF)", "*.png *.gif"), ("PNG", "*.png"), ("GIF", "*.gif")])
+            filetypes=IMAGE_FILETYPES)
         if not paths:
             return
-        os.makedirs(ACC_DIR, exist_ok=True)
-        added = None
-        for p in paths:
-            base = os.path.basename(p)
-            stem, ext = os.path.splitext(base)
-            if ext.lower() not in IMG_EXT:
-                continue
-            stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "accessory"
-            dest, n = os.path.join(ACC_DIR, stem + ext.lower()), 2
-            while os.path.exists(accessory_path(os.path.basename(dest))):
-                dest = os.path.join(ACC_DIR, "%s (%d)%s" % (stem, n, ext.lower()))
-                n += 1
-            try:
-                shutil.copyfile(p, dest)
-                tk.PhotoImage(file=dest)
-                added = os.path.basename(dest)
-            except Exception as ex:
-                log("add accessory %s: %s" % (base, ex))
-                try:
-                    os.remove(dest)
-                except Exception:
-                    pass
+        added, bad = import_images(paths, ACC_DIR, "accessory")
+        if bad:
+            show_import_failures(self.top, "꾸미기", bad)
         if added:
             self.toggle(added)
         else:
