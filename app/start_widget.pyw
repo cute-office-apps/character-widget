@@ -158,7 +158,7 @@ UI_DIR = os.path.join(DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
 UPDATE_ZIP = "CharacterWidget_v1.0.zip"          # 기본판 zip 안의 app\ 파일만 바꿔요
 UPDATE_KEEP = {"settings.ini", "decor.json", "names.json", "state.json", "memo.txt", "pos.txt",
@@ -1740,7 +1740,7 @@ class CuteMenu:
     """Card-style right-click menu with icons."""
     BG = "#fffaf0"
     HOV = "#ffe9b8"
-    W = 228
+    W = 252
 
     def __init__(self, app, x, y):
         self.app = app
@@ -1763,15 +1763,11 @@ class CuteMenu:
         c.pack()
         round_rect(c, 2, 2, W - 3, H - 3, 18, fill=self.BG, outline=LINE, width=2)
         # header: little picture of the character + "토리의 메뉴"
-        try:
-            fr = app.char["idle"][0]
-            f = max(1, -(-fr.height() // 38))
-            self.thumb = fr.subsample(f, f)
-            c.create_image(30, head_h // 2 + 2, image=self.thumb)
-        except Exception:
-            self.thumb = None
-        c.create_text(56, head_h // 2 + 2, text="%s의 메뉴" % app.name, anchor="w",
-                      font=("Malgun Gothic", 11, "bold"), fill=TEXT)
+        self.head_h = head_h
+        self.head_img = None
+        self.head_text = c.create_text(56, head_h // 2 + 2, text="", anchor="w",
+                                       font=("Malgun Gothic", 11, "bold"), fill=TEXT)
+        self.refresh_header()
         c.create_line(16, head_h + 2, W - 16, head_h + 2, fill="#e6d6bf", dash=(3, 3))
         y = head_h + 6
         for i, (icon, label, cmd) in enumerate(items):
@@ -1782,6 +1778,7 @@ class CuteMenu:
         # on/off switches
         self.switches = {}
         self.toggle_row("tog_rand", y, tog_h, "캐릭터 랜덤으로 바꾸기", app.random_on, self.toggle_random)
+        self.shuffle_button(self.W - 62 - 20, y + tog_h // 2 - 1)
         y += tog_h
         self.toggle_row("tog", y, tog_h, "컴퓨터 켤 때 자동 실행", autostart_enabled, self.toggle_autostart)
         y += tog_h
@@ -1795,6 +1792,7 @@ class CuteMenu:
         yy = max(wa[1] + 4, min(app.root.winfo_pointery() - H // 2, wa[3] - H - 4))
         top.geometry("%dx%d+%d+%d" % (W, H, x, yy))
         top.bind("<Escape>", lambda e: self.close())
+        top.bind("<F5>", lambda e: self.shuffle())
         top.bind("<FocusOut>", lambda e: top.after(120, self.close_if_unfocused))
         top.after(30, self.grab_focus)
         top.after(20000, self.close)
@@ -1870,6 +1868,34 @@ class CuteMenu:
         self.app.set_random_on(not self.app.random_on())
         if self.alive:
             self.draw_switch("tog_rand")
+
+    def refresh_header(self):
+        c, app, hh = self.c, self.app, self.head_h
+        if self.head_img:
+            c.delete(self.head_img)
+            self.head_img = None
+        try:
+            fr = app.char["idle"][0]
+            f = max(1, -(-fr.height() // 38))
+            self.thumb = fr.subsample(f, f)
+            self.head_img = c.create_image(30, hh // 2 + 2, image=self.thumb)
+        except Exception:
+            self.thumb = None
+        c.itemconfig(self.head_text, text="%s의 메뉴" % app.name)
+
+    def shuffle_button(self, cx, cy):
+        """↻ : 지금 바로 다른 캐릭터로 바꾸기 (F5 키도 같아요)"""
+        c, tag, r = self.c, "shuffle", 11
+        bg = c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#fff4dc", outline="#d9c2a3", tags=(tag,))
+        c.create_text(cx, cy, text="↻", font=("Segoe UI Symbol", 11, "bold"), fill=TEXT, tags=(tag,))
+        c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
+        c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill="#fff4dc"), c.config(cursor="")))
+        c.tag_bind(tag, "<Button-1>", lambda e: self.shuffle())
+
+    def shuffle(self):
+        if self.app.random_now() and self.alive:
+            self.refresh_header()
+            self.grab_focus()
 
     def run(self, cmd):
         self.close()
@@ -2185,6 +2211,7 @@ class App:
         self.label.bind("<B1-Motion>", self.on_move)
         self.label.bind("<ButtonRelease-1>", self.on_up)
         self.label.bind("<Button-3>", self.on_menu)
+        r.bind("<F5>", lambda e: self.random_now())
         self.autostart = tk.BooleanVar(value=autostart_enabled())
         self.cute_menu = None
         self.settings_win = None
@@ -2597,6 +2624,18 @@ class App:
         if not others:
             return False
         return self.set_character(random.choice(others)) is True
+
+    def random_now(self):
+        """새로고침(↻ 버튼, F5): 지금 바로 다른 캐릭터로. 랜덤 스위치가 꺼져 있어도 돼요."""
+        if self.placeholder:
+            return False
+        if len(list_characters()) < 2:
+            self.say("캐릭터가 2개 이상 있어야\n바꿀 수 있어!\n(메뉴 → 캐릭터 바꾸기 → +)", 8, False)
+            return False
+        if self.random_switch():
+            return True
+        self.say("캐릭터 바꾸기·꾸미기 창을 닫으면\n바꿀 수 있어요!", 5, False)
+        return False
 
     def random_tick(self):
         try:
