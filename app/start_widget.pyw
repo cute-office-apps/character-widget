@@ -156,6 +156,65 @@ BUILTIN_NAME = "기본 캐릭터"
 IMG_EXT = (".png", ".gif")
 UI_DIR = os.path.join(DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
+
+# ---------- 자동 업데이트
+APP_VERSION = "1.3"
+UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
+UPDATE_ZIP = "CharacterWidget_v1.0.zip"          # 기본판 zip 안의 app\ 파일만 바꿔요
+UPDATE_KEEP = {"settings.ini", "decor.json", "names.json", "state.json", "memo.txt", "pos.txt",
+               "character_choice.txt", "error.log", "launch.log", "diag.txt"}
+
+
+def version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split("."))
+    except Exception:
+        return (0,)
+
+
+def fetch_bytes(url, limit=5 * 1024 * 1024):
+    sep = "&" if "?" in url else "?"
+    req = urllib.request.Request(url + sep + "t=%d" % int(time.time()),
+                                 headers={"User-Agent": "CharacterWidget/" + APP_VERSION})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("파일이 너무 커요")
+    return data
+
+
+def apply_update_zip(data):
+    """기본판 zip 에서 app\\ 아래 파일만 위젯 폴더에 덮어써요. 내 설정·메모·캐릭터는 건드리지 않아요."""
+    import io
+    import zipfile
+    z = zipfile.ZipFile(io.BytesIO(data))
+    prefix = None
+    for n in z.namelist():
+        if n.endswith("/app/start_widget.pyw"):
+            prefix = n[:-len("start_widget.pyw")]
+            break
+    if not prefix:
+        raise ValueError("업데이트 파일 모양이 이상해요")
+    root = os.path.abspath(DIR)
+    count = 0
+    for info in z.infolist():
+        n = info.filename
+        if not n.startswith(prefix) or n.endswith("/"):
+            continue
+        rel = n[len(prefix):]
+        parts = rel.split("/")
+        if parts[0] in ("characters", ".anim") or rel in UPDATE_KEEP or ".." in parts:
+            continue
+        dst = os.path.abspath(os.path.join(root, *parts))
+        if not dst.startswith(root + os.sep):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".new"
+        with open(tmp, "wb") as f:
+            f.write(z.read(info))
+        os.replace(tmp, dst)
+        count += 1
+    return count
 DEFAULT_CHAR = "토리.png"
 ACC_DIR = os.path.join(DIR, "accessories")
 FX_DIR = os.path.join(ACC_DIR, "effects")
@@ -1681,7 +1740,7 @@ class CuteMenu:
     """Card-style right-click menu with icons."""
     BG = "#fffaf0"
     HOV = "#ffe9b8"
-    W = 228
+    W = 252
 
     def __init__(self, app, x, y):
         self.app = app
@@ -1699,20 +1758,16 @@ class CuteMenu:
                  ("help", "사용법 보기", app.start_tour)]
         head_h, row_h, tog_h, foot_h = 52, 36, 40, 52
         W = self.W
-        H = head_h + 6 + len(items) * row_h + 8 + tog_h + foot_h
+        H = head_h + 6 + len(items) * row_h + 8 + tog_h * 2 + foot_h
         c = self.c = tk.Canvas(top, width=W, height=H, bg=KEY, highlightthickness=0, bd=0)
         c.pack()
         round_rect(c, 2, 2, W - 3, H - 3, 18, fill=self.BG, outline=LINE, width=2)
         # header: little picture of the character + "토리의 메뉴"
-        try:
-            fr = app.char["idle"][0]
-            f = max(1, -(-fr.height() // 38))
-            self.thumb = fr.subsample(f, f)
-            c.create_image(30, head_h // 2 + 2, image=self.thumb)
-        except Exception:
-            self.thumb = None
-        c.create_text(56, head_h // 2 + 2, text="%s의 메뉴" % app.name, anchor="w",
-                      font=("Malgun Gothic", 11, "bold"), fill=TEXT)
+        self.head_h = head_h
+        self.head_img = None
+        self.head_text = c.create_text(56, head_h // 2 + 2, text="", anchor="w",
+                                       font=("Malgun Gothic", 11, "bold"), fill=TEXT)
+        self.refresh_header()
         c.create_line(16, head_h + 2, W - 16, head_h + 2, fill="#e6d6bf", dash=(3, 3))
         y = head_h + 6
         for i, (icon, label, cmd) in enumerate(items):
@@ -1720,17 +1775,12 @@ class CuteMenu:
             y += row_h
         c.create_line(16, y + 4, W - 16, y + 4, fill="#e6d6bf", dash=(3, 3))
         y += 8
-        # autostart switch
-        self.ty = y
-        tag = "tog"
-        self.tog_bg = round_rect(c, 8, y + 2, W - 8, y + tog_h - 4, 10, fill=self.BG, outline="", tags=(tag,))
-        c.create_text(20, y + tog_h // 2 - 1, text="컴퓨터 켤 때 자동 실행", anchor="w",
-                      font=("Malgun Gothic", 9), fill=TEXT, tags=(tag,))
-        self.switch_items = []
-        self.draw_switch()
-        c.tag_bind(tag, "<Enter>", lambda e: c.itemconfig(self.tog_bg, fill=self.HOV))
-        c.tag_bind(tag, "<Leave>", lambda e: c.itemconfig(self.tog_bg, fill=self.BG))
-        c.tag_bind(tag, "<Button-1>", lambda e: self.toggle_autostart())
+        # on/off switches
+        self.switches = {}
+        self.toggle_row("tog_rand", y, tog_h, "캐릭터 랜덤으로 바꾸기", app.random_on, self.toggle_random)
+        self.shuffle_button(self.W - 62 - 20, y + tog_h // 2 - 1)
+        y += tog_h
+        self.toggle_row("tog", y, tog_h, "컴퓨터 켤 때 자동 실행", autostart_enabled, self.toggle_autostart)
         y += tog_h
         # footer buttons
         half = (W - 16 * 2 - 8) // 2
@@ -1742,6 +1792,7 @@ class CuteMenu:
         yy = max(wa[1] + 4, min(app.root.winfo_pointery() - H // 2, wa[3] - H - 4))
         top.geometry("%dx%d+%d+%d" % (W, H, x, yy))
         top.bind("<Escape>", lambda e: self.close())
+        top.bind("<F5>", lambda e: self.shuffle())
         top.bind("<FocusOut>", lambda e: top.after(120, self.close_if_unfocused))
         top.after(30, self.grab_focus)
         top.after(20000, self.close)
@@ -1783,21 +1834,68 @@ class CuteMenu:
         c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill=fill), c.config(cursor="")))
         c.tag_bind(tag, "<Button-1>", lambda e: self.run(cmd))
 
-    def draw_switch(self):
+    def toggle_row(self, tag, y, h, label, is_on, on_click):
         c = self.c
-        for it in self.switch_items:
+        bg = round_rect(c, 8, y + 2, self.W - 8, y + h - 4, 10, fill=self.BG, outline="", tags=(tag,))
+        c.create_text(20, y + h // 2 - 1, text=label, anchor="w",
+                      font=("Malgun Gothic", 9), fill=TEXT, tags=(tag,))
+        self.switches[tag] = {"y": y, "is_on": is_on, "items": []}
+        self.draw_switch(tag)
+        c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
+        c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill=self.BG), c.config(cursor="")))
+        c.tag_bind(tag, "<Button-1>", lambda e: on_click())
+
+    def draw_switch(self, tag="tog"):
+        c, sw = self.c, self.switches[tag]
+        for it in sw["items"]:
             c.delete(it)
-        on = autostart_enabled()
-        x1, y1 = self.W - 62, self.ty + 10
+        try:
+            on = bool(sw["is_on"]())
+        except Exception:
+            on = False
+        x1, y1 = self.W - 62, sw["y"] + 10
         pill = round_rect(c, x1, y1, x1 + 40, y1 + 20, 10, fill="#9fd8b0" if on else "#e2d9cc",
-                          outline="#d0c2ad", width=1, tags=("tog",))
+                          outline="#d0c2ad", width=1, tags=(tag,))
         kx = x1 + 30 if on else x1 + 10
-        knob = c.create_oval(kx - 8, y1 + 2, kx + 8, y1 + 18, fill="white", outline="#d0c2ad", tags=("tog",))
-        self.switch_items = [pill, knob]
+        knob = c.create_oval(kx - 8, y1 + 2, kx + 8, y1 + 18, fill="white", outline="#d0c2ad", tags=(tag,))
+        sw["items"] = [pill, knob]
 
     def toggle_autostart(self):
         self.app.set_autostart_on(not autostart_enabled())
-        self.draw_switch()
+        self.draw_switch("tog")
+
+    def toggle_random(self):
+        self.app.set_random_on(not self.app.random_on())
+        if self.alive:
+            self.draw_switch("tog_rand")
+
+    def refresh_header(self):
+        c, app, hh = self.c, self.app, self.head_h
+        if self.head_img:
+            c.delete(self.head_img)
+            self.head_img = None
+        try:
+            fr = app.char["idle"][0]
+            f = max(1, -(-fr.height() // 38))
+            self.thumb = fr.subsample(f, f)
+            self.head_img = c.create_image(30, hh // 2 + 2, image=self.thumb)
+        except Exception:
+            self.thumb = None
+        c.itemconfig(self.head_text, text="%s의 메뉴" % app.name)
+
+    def shuffle_button(self, cx, cy):
+        """↻ : 지금 바로 다른 캐릭터로 바꾸기 (F5 키도 같아요)"""
+        c, tag, r = self.c, "shuffle", 11
+        bg = c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#fff4dc", outline="#d9c2a3", tags=(tag,))
+        c.create_text(cx, cy, text="↻", font=("Segoe UI Symbol", 11, "bold"), fill=TEXT, tags=(tag,))
+        c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
+        c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill="#fff4dc"), c.config(cursor="")))
+        c.tag_bind(tag, "<Button-1>", lambda e: self.shuffle())
+
+    def shuffle(self):
+        if self.app.random_now() and self.alive:
+            self.refresh_header()
+            self.grab_focus()
 
     def run(self, cmd):
         self.close()
@@ -1893,13 +1991,16 @@ class SettingsWindow:
         check("컴퓨터 켤 때 자동 실행", self.auto)
         links = tk.Frame(top, bg=self.BG)
         links.pack(anchor="w", padx=24, pady=(6, 0))
-        for text, cmd in (("위젯 폴더 열기", lambda: os.startfile(DIR)), ("고급: 설정 파일 직접 열기", app.open_settings)):
+        for text, cmd in (("위젯 폴더 열기", lambda: os.startfile(DIR)), ("고급: 설정 파일 직접 열기", app.open_settings),
+                          ("업데이트 확인", lambda: (self.close(), app.update_check(manual=True)))):
             lk = tk.Label(links, text=text, bg=self.BG, fg="#a08a76", cursor="hand2",
                           font=("Malgun Gothic", 8, "underline"))
             lk.pack(side="left", padx=(0, 12))
             lk.bind("<Button-1>", lambda e, c=cmd: c())
         btns = tk.Frame(top, bg=self.BG)
         btns.pack(fill="x", padx=18, pady=14)
+        tk.Label(btns, text="버전 %s" % APP_VERSION, bg=self.BG, fg="#b8a690",
+                 font=("Malgun Gothic", 8)).pack(side="left")
         tk.Button(btns, text="취소", command=self.close, font=("Malgun Gothic", 10), bg="white",
                   relief="groove", padx=12).pack(side="right", padx=(6, 0))
         tk.Button(btns, text="저장", command=self.save, font=("Malgun Gothic", 10, "bold"), bg="#ffd27a",
@@ -2081,6 +2182,8 @@ class App:
         if self.placeholder:
             self.char_key, self.char = None, None
         want = read_choice() if keys else ""
+        if len(keys) > 1 and load_state().get("random_char"):      # 랜덤 바꾸기: 켤 때마다 다른 친구
+            want = random.choice([k for k in keys if k != want] or keys)
         if keys:
             self.char_key = want if want in keys else (DEFAULT_CHAR if DEFAULT_CHAR in keys else keys[0])
             try:
@@ -2108,6 +2211,7 @@ class App:
         self.label.bind("<B1-Motion>", self.on_move)
         self.label.bind("<ButtonRelease-1>", self.on_up)
         self.label.bind("<Button-3>", self.on_menu)
+        r.bind("<F5>", lambda e: self.random_now())
         self.autostart = tk.BooleanVar(value=autostart_enabled())
         self.cute_menu = None
         self.settings_win = None
@@ -2127,6 +2231,11 @@ class App:
         _d = self.dec_for(self.char_key)
         self.cur_sig = decor_sig(_d) + "/" + str((_d or {}).get("effect"))
         self.root.after(10 * 60 * 1000, self.season_check)
+        self.next_random = time.time() + self.random_minutes() * 60
+        r.after(60 * 1000, self.random_tick)
+        self.uq = queue.Queue()
+        self.update_busy = False
+        r.after(90 * 1000, self.update_check)
         self.animate()
         r.after(2500, lambda: self.refresh(True))
         r.after(30000, self.tick)
@@ -2485,6 +2594,57 @@ class App:
     def toggle_autostart(self):
         self.set_autostart_on(self.autostart.get())
 
+    # ---------- random character
+    def random_on(self):
+        return bool(self.state.get("random_char"))
+
+    def random_minutes(self):
+        return max(1, self.int_cfg("RANDOM_MINUTES", 30))
+
+    def set_random_on(self, want):
+        if want and len(list_characters()) < 2:
+            self.say("캐릭터가 2개 이상 있어야\n랜덤으로 바꿀 수 있어!\n(메뉴 → 캐릭터 바꾸기 → +)", 8, False)
+            return
+        self.state["random_char"] = bool(want)
+        save_state(self.state)
+        if want:
+            self.random_switch()
+            self.say("이제 %d분마다 다른 친구로 바뀔게!" % self.random_minutes(), 5, False)
+        else:
+            self.next_random = time.time() + self.random_minutes() * 60
+            self.say("랜덤 바꾸기를 껐어!", 4, False)
+
+    def random_switch(self):
+        self.next_random = time.time() + self.random_minutes() * 60
+        if self.placeholder:
+            return False
+        if (self.picker and self.picker.alive) or (self.decor_win and self.decor_win.alive):
+            return False                                    # 바꾸기·꾸미기 창을 쓰는 중이면 기다려요
+        others = [k for k in list_characters() if k != self.char_key]
+        if not others:
+            return False
+        return self.set_character(random.choice(others)) is True
+
+    def random_now(self):
+        """새로고침(↻ 버튼, F5): 지금 바로 다른 캐릭터로. 랜덤 스위치가 꺼져 있어도 돼요."""
+        if self.placeholder:
+            return False
+        if len(list_characters()) < 2:
+            self.say("캐릭터가 2개 이상 있어야\n바꿀 수 있어!\n(메뉴 → 캐릭터 바꾸기 → +)", 8, False)
+            return False
+        if self.random_switch():
+            return True
+        self.say("캐릭터 바꾸기·꾸미기 창을 닫으면\n바꿀 수 있어요!", 5, False)
+        return False
+
+    def random_tick(self):
+        try:
+            if self.random_on() and time.time() >= self.next_random:
+                self.random_switch()
+        except Exception as ex:
+            log("random: %s" % ex)
+        self.root.after(60 * 1000, self.random_tick)
+
     def open_settings_window(self):
         if self.settings_win and self.settings_win.alive:
             self.settings_win.close()
@@ -2607,7 +2767,87 @@ class App:
                 self.fetched(*self.q.get_nowait())
         except queue.Empty:
             pass
+        try:
+            while True:
+                kind, ok, val = self.uq.get_nowait()
+                (self.update_found if kind == "check" else self.update_done)(ok, val)
+        except (queue.Empty, AttributeError):
+            pass
         self.root.after(300, self.poll)
+
+    # ---------- auto update
+    def update_check(self, manual=False):
+        if not manual:
+            self.root.after(6 * 3600 * 1000, self.update_check)   # 6시간마다 다시 확인
+            if self.cfg.get("AUTO_UPDATE", "on").lower() in ("off", "0", "no", "false"):
+                return
+        if self.update_busy:
+            return
+        base = self.cfg.get("UPDATE_BASE") or UPDATE_BASE
+
+        def work():
+            try:
+                v = fetch_bytes(base + "version.txt", 1024).decode("utf-8", "replace").strip()
+                self.uq.put(("check", True, (v, manual)))
+            except Exception as ex:
+                self.uq.put(("check", False, (str(ex), manual)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_found(self, ok, val):
+        v, manual = val
+        if not ok:
+            log("update check: %s" % v)
+            if manual:
+                self.say("업데이트를 확인하지 못했어요.\n인터넷 연결을 확인해 주세요.", 8, False)
+            return
+        if version_tuple(v) <= version_tuple(APP_VERSION):
+            if manual:
+                self.say("지금 최신 버전이에요! (%s)" % APP_VERSION, 5, False)
+            return
+        if not manual and self.state.get("update_later") == "%s/%s" % (v, date.today()):
+            return                                                  # 오늘 '나중에'를 눌렀으면 내일 다시
+        self.ask_update(v)
+
+    def ask_update(self, v):
+        if self.bubble_busy():
+            self.root.after(10000, lambda: self.ask_update(v))
+            return
+
+        def later():
+            self.bubble.close()
+            self.state["update_later"] = "%s/%s" % (v, date.today())
+            save_state(self.state)
+
+        self.say("새 버전(%s)이 나왔어요!\n업데이트할까요?\n(메모·캐릭터·설정은 그대로예요)" % v, 0,
+                 buttons=[("나중에", later, False), ("업데이트", lambda: self.start_update(v), True)])
+
+    def start_update(self, v):
+        if self.bubble:
+            self.bubble.close()
+        self.update_busy = True
+        self.say("업데이트 받는 중…", 60, False)
+        base = self.cfg.get("UPDATE_BASE") or UPDATE_BASE
+
+        def work():
+            try:
+                n = apply_update_zip(fetch_bytes(base + UPDATE_ZIP))
+                self.uq.put(("apply", True, (v, n)))
+            except Exception as ex:
+                self.uq.put(("apply", False, (v, str(ex))))
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_done(self, ok, val):
+        self.update_busy = False
+        v, info = val
+        if not ok:
+            log("update: %s" % info)
+            self.say("앗, 업데이트를 못 했어요…\n잠시 뒤에 다시 해볼게요.\n(%s)" % info, 10, False)
+            return
+        log("updated to %s (%s files)" % (v, info))
+        self.state.pop("update_later", None)
+        save_state(self.state)
+        self.say("업데이트 끝! (%s)\n새 버전으로 다시 시작할게요" % v, 3)
+        self.root.after(2500, self.restart)
 
     def fetched(self, evs, ok, err, announce, diag=None):
         self.fetching = False
