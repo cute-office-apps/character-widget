@@ -9,9 +9,9 @@
 
 ## 내려받기
 
-**[간편판 내려받기 (Python 설치 필요 없음, 추천)](https://github.com/ckgpdud/character-widget/raw/main/CharacterWidget_v1.0_Easy.zip)** · 약 14MB
+**[간편판 내려받기 (Python 설치 필요 없음, 추천)](https://github.com/cute-office-apps/character-widget/raw/main/CharacterWidget_v1.0_Easy.zip)** · 약 14MB
 
-[기본판 내려받기 (Python을 직접 설치해서 쓰는 버전)](https://github.com/ckgpdud/character-widget/raw/main/CharacterWidget_v1.0.zip) · 약 0.2MB
+[기본판 내려받기 (Python을 직접 설치해서 쓰는 버전)](https://github.com/cute-office-apps/character-widget/raw/main/CharacterWidget_v1.0.zip) · 약 0.2MB
 
 ## 설치 방법 (간편판)
 

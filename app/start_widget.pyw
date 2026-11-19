@@ -158,8 +158,8 @@ UI_DIR = os.path.join(DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
-APP_VERSION = "1.1"
-UPDATE_BASE = "https://raw.githubusercontent.com/ckgpdud/character-widget/main/"
+APP_VERSION = "1.2"
+UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
 UPDATE_ZIP = "CharacterWidget_v1.0.zip"          # 기본판 zip 안의 app\ 파일만 바꿔요
 UPDATE_KEEP = {"settings.ini", "decor.json", "names.json", "state.json", "memo.txt", "pos.txt",
                "character_choice.txt", "error.log", "launch.log", "diag.txt"}
