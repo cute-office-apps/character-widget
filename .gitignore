@@ -16,3 +16,6 @@ __pycache__/
 *.pyc
 Thumbs.db
 desktop.ini
+
+# macOS 배포용 빌드
+/dist/

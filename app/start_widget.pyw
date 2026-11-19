@@ -1,30 +1,20 @@
 # -*- coding: utf-8 -*-
 """데스크탑 캐릭터 위젯 — 메모 전용 (Python 표준 라이브러리만 사용)
 
-- 캐릭터 클릭: 스티커 메모 열기
+- 캐릭터 클릭: 메모 열기
 - 우클릭 → 캐릭터 변경: 캐릭터 고르기 / + 로 그림 추가
-설정: 같은 폴더의 settings.ini
 """
-import os
-import sys
-from datetime import datetime as _dt
-
-# very first thing: record that the script was started (helps when nothing appears)
-try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.log"), "a", encoding="utf-8") as _f:
-        _f.write("%s start  python=%s  exe=%s\n" % (_dt.now().isoformat(timespec="seconds"), sys.version.split()[0], sys.executable))
-except Exception:
-    pass
-
 import copy
 import ctypes
 import json
+import os
 import random
 import math
 import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -35,14 +25,19 @@ from datetime import datetime, date
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 
-DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, DIR)
+MAC = sys.platform == "darwin"
+ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ASSET_DIR)
 import widget_cal as usagi_cal  # noqa: E402
 
+DIR = os.path.expanduser("~/Library/Application Support/CharacterWidget") if MAC else ASSET_DIR
 KEY = "#010101"              # colour made transparent on screen (near-black: soft edges blend into a dark outline)
+WINDOW_BG = "systemTransparent" if MAC else KEY
 LINE = "#4a3428"
 TEXT = "#3c281e"
-FONT = ("Malgun Gothic", 10)
+FONT_FAMILY = "Apple SD Gothic Neo" if MAC else "Malgun Gothic"
+FONT = (FONT_FAMILY, 10)
+CONTEXT_EVENTS = ("<Button-2>", "<Control-Button-1>") if MAC else ("<Button-3>",)
 APP_NAME = "DesktopBuddyWidget"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STICKY_APP = "shell:AppsFolder\\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe!App"
@@ -55,8 +50,17 @@ def log(msg):
         pass
 
 
-# ---------------------------------------------------------------- Windows helpers
+# ---------------------------------------------------------------- desktop helpers
 def single_instance():
+    if MAC:
+        import fcntl
+        lock = open(os.path.join(DIR, "widget.lock"), "a", encoding="utf-8")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            return None
+        return lock
     try:
         k32 = ctypes.windll.kernel32
         handle = k32.CreateMutexW(None, False, "DesktopBuddyWidget_Python")
@@ -68,6 +72,9 @@ def single_instance():
 
 
 def virtual_screen():
+    if MAC:
+        r = tk._default_root
+        return 0, 0, r.winfo_screenwidth(), r.winfo_screenheight()
     try:
         u = ctypes.windll.user32
         x, y = u.GetSystemMetrics(76), u.GetSystemMetrics(77)
@@ -77,6 +84,9 @@ def virtual_screen():
 
 
 def work_area():
+    if MAC:
+        _, _, width, height = virtual_screen()
+        return 0, 28, width, height - 70
     try:
         class RECT(ctypes.Structure):
             _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long), ("r", ctypes.c_long), ("b", ctypes.c_long)]
@@ -124,7 +134,32 @@ def pythonw_path():
     return exe
 
 
+def configure_overlay(window):
+    if MAC:
+        window.withdraw()
+    window.overrideredirect(True)
+    window.attributes("-topmost", True)
+    window.config(bg=WINDOW_BG)
+    if MAC:
+        window.attributes("-transparent", True)
+    else:
+        window.attributes("-transparentcolor", KEY)
+
+
+def open_folder(path):
+    if MAC:
+        subprocess.Popen(["/usr/bin/open", path])
+    else:
+        os.startfile(path)
+
+
+def open_login_items():
+    subprocess.Popen(["/usr/bin/open", "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"])
+
+
 def autostart_enabled():
+    if MAC:
+        return False
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
@@ -154,7 +189,7 @@ CHOICE_FILE = os.path.join(DIR, "character_choice.txt")
 BUILTIN = "__builtin__"
 BUILTIN_NAME = "기본 캐릭터"
 IMG_EXT = (".png", ".gif")
-UI_DIR = os.path.join(DIR, "ui")
+UI_DIR = os.path.join(ASSET_DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
@@ -217,7 +252,8 @@ def apply_update_zip(data):
     return count
 DEFAULT_CHAR = "토리.png"
 ACC_DIR = os.path.join(DIR, "accessories")
-FX_DIR = os.path.join(ACC_DIR, "effects")
+BUNDLED_ACC_DIR = os.path.join(ASSET_DIR, "accessories")
+FX_DIR = os.path.join(BUNDLED_ACC_DIR, "effects")
 DECOR_FILE = os.path.join(DIR, "decor.json")
 SLOTS = ["ground", "body", "side", "head", "pin"]          # drawing order (head things on top)
 SLOT_NAMES = {"head": "머리", "pin": "머리핀", "body": "몸", "side": "손", "ground": "바닥"}
@@ -387,6 +423,13 @@ def list_accessories():
         return []
 
 
+def accessory_path(item):
+    path = os.path.join(BUNDLED_ACC_DIR, item)
+    if os.path.isfile(path):
+        return path
+    return os.path.join(ACC_DIR, item)
+
+
 def custom_accessories():
     return [n for n in list_accessories() if n not in ACC_INFO]
 
@@ -449,7 +492,7 @@ def build_dec(items, effect, places, decor):
     layers = []
     for slot in SLOTS:
         it = items.get(slot)
-        if it and os.path.exists(os.path.join(ACC_DIR, it)):
+        if it and os.path.exists(accessory_path(it)):
             d = dict(default_place(), **(places.get(it) or {}))
             d.update(item=it, **{k: v for k, v in acc_info(it, decor).items()})
             layers.append(d)
@@ -483,7 +526,7 @@ def decor_sig(dec):
     stamps = []
     for l in dec["layers"]:
         try:
-            st = os.stat(os.path.join(ACC_DIR, l["item"]))
+            st = os.stat(accessory_path(l["item"]))
             stamps.append("%d_%d" % (int(st.st_mtime), st.st_size))
         except Exception:
             pass
@@ -567,9 +610,7 @@ def sized_photo(img, size, bg=False):
         except Exception as ex:
             log("bg remove: %s" % ex)
     src = resample(src, img.width(), img.height(), tw, th)
-    out = tk.PhotoImage(width=tw, height=th)
-    out.put(" ".join("{" + " ".join(r) + "}" for r in src))
-    return out, src
+    return rows_photo(src, tw, th), src
 
 
 def image_frames(path, max_size, dec=None):
@@ -601,7 +642,7 @@ def image_frames(path, max_size, dec=None):
 
 
 def builtin_frames(prefix):
-    folder = os.path.join(DIR, "frames")
+    folder = os.path.join(ASSET_DIR, "frames")
     try:
         names = sorted(n for n in os.listdir(folder) if n.startswith(prefix) and n.endswith(".png"))
     except FileNotFoundError:
@@ -611,7 +652,7 @@ def builtin_frames(prefix):
 
 def list_characters():
     keys = []
-    if os.path.isdir(os.path.join(DIR, "frames")):
+    if os.path.isdir(os.path.join(ASSET_DIR, "frames")):
         keys.append(BUILTIN)
     if os.path.isdir(CHAR_DIR):
         keys += sorted((n for n in os.listdir(CHAR_DIR) if n.lower().endswith(IMG_EXT)), key=str.lower)
@@ -675,7 +716,7 @@ HOP_SPEC = [(1.10, 0.88, 0, 0), (1.04, 0.96, 6, 0), (0.95, 1.06, 18, 0), (0.96, 
 
 def source_path(key):
     if key == BUILTIN:
-        return os.path.join(DIR, "frames", "base.png")
+        return os.path.join(ASSET_DIR, "frames", "base.png")
     return os.path.join(CHAR_DIR, key)
 
 
@@ -829,7 +870,7 @@ _ACC_CACHE = {}
 
 
 def accessory_rows(item, width):
-    path = os.path.join(ACC_DIR, item)
+    path = accessory_path(item)
     try:
         stamp = os.path.getmtime(path)
     except OSError:
@@ -896,6 +937,20 @@ def wear(src, sw, sh, dec, bb=None):
 
 
 def rows_photo(rows, w, h, bg=None):
+    if MAC and bg is None:
+        # A PNG transparent-color chunk converts the renderer's color key to actual alpha on Aqua.
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            payload = kind + data
+            return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
+
+        pixels = b"".join(b"\0" + bytes.fromhex("".join(row).replace("#", "")) for row in rows)
+        data = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                + chunk(b"tRNS", struct.pack(">HHH", *_rgb(KEY)))
+                + chunk(b"IDAT", zlib.compress(pixels, level=1)) + chunk(b"IEND", b""))
+        return tk.PhotoImage(data=data, format="png")
     data = " ".join("{" + " ".join(r) + "}" for r in rows)
     if bg:
         data = data.replace(KEY, bg)
@@ -908,7 +963,7 @@ def _render(src, sw, sh, cw, ch, sx, sy, dy, lean):
     """Squash/stretch + lean, nearest-neighbour, feet anchored at the bottom centre."""
     px, py = cw / 2.0, ch - 4 - dy
     xmap = [int((x - px) / sx + sw / 2.0) for x in range(cw)]
-    blank = "{" + " ".join([KEY] * cw) + "}"
+    blank = [KEY] * cw
     tan = math.tan(math.radians(lean))
     rows = []
     for y in range(ch):
@@ -923,8 +978,8 @@ def _render(src, sw, sh, cw, ch, sx, sy, dy, lean):
             row = [KEY] * shift + row[:-shift]
         elif shift < 0:
             row = row[-shift:] + [KEY] * (-shift)
-        rows.append("{" + " ".join(row) + "}")
-    return " ".join(rows)
+        rows.append(row)
+    return rows
 
 
 def still_source(key, max_size, bg=True, dec=None):
@@ -962,9 +1017,7 @@ def animated_frames(key, max_size, bg=True, dec=None):
     cw, ch = int(sw * 1.12) + 10, int(sh * 1.07) + 44
     out = []
     for spec in IDLE_SPEC + HOP_SPEC:
-        img = tk.PhotoImage(width=cw, height=ch)
-        img.put(_render(src, sw, sh, cw, ch, *spec))
-        out.append(img)
+        out.append(rows_photo(_render(src, sw, sh, cw, ch, *spec), cw, ch))
     idle, hop = out[:len(IDLE_SPEC)], out[len(IDLE_SPEC):]
     try:                                         # cache so next time is instant
         os.makedirs(folder, exist_ok=True)
@@ -1025,7 +1078,7 @@ def write_choice(key):
 def thumbnail(key, size=96):
     try:
         if key == BUILTIN:
-            img = tk.PhotoImage(file=os.path.join(DIR, "frames", "idle_00.png"))
+            img = tk.PhotoImage(file=os.path.join(ASSET_DIR, "frames", "idle_00.png"))
         else:
             path = os.path.join(CHAR_DIR, key)
             fmt = "gif -index 0" if key.lower().endswith(".gif") else None
@@ -1052,7 +1105,7 @@ class Picker:
         top.config(bg=self.BG)
         top.resizable(False, False)
         tk.Label(top, text="캐릭터를 눌러서 바꾸세요  ·  + 로 그림 추가  ·  더블클릭/우클릭으로 이름 바꾸기",
-                 bg=self.BG, fg="#6b5545", font=("Malgun Gothic", 9)).pack(padx=14, pady=(12, 4))
+                 bg=self.BG, fg="#6b5545", font=(FONT_FAMILY, 9)).pack(padx=14, pady=(12, 4))
         self.grid = tk.Frame(top, bg=self.BG)
         self.grid.pack(padx=10, pady=(4, 14))
         self.thumbs = []
@@ -1088,9 +1141,9 @@ class Picker:
             inner.pack(padx=3, pady=3)
             inner.pack_propagate(False)
             if key == "+":
-                lab = tk.Label(inner, text="+", font=("Malgun Gothic", 34), fg="#c9a87c", bg="white")
+                lab = tk.Label(inner, text="+", font=(FONT_FAMILY, 34), fg="#c9a87c", bg="white")
                 lab.pack(expand=True)
-                cap = tk.Label(inner, text="그림 추가", font=("Malgun Gothic", 9), fg="#8a7360", bg="white")
+                cap = tk.Label(inner, text="그림 추가", font=(FONT_FAMILY, 9), fg="#8a7360", bg="white")
                 cap.pack(pady=(0, 6))
                 widgets = (cell, inner, lab, cap)
                 for w in widgets:
@@ -1102,11 +1155,12 @@ class Picker:
             lab.pack(expand=True)
             name = char_name(key)
             cap = tk.Label(inner, text=(name if len(name) <= 9 else name[:8] + "…") + (" ✔" if selected else ""),
-                           font=("Malgun Gothic", 9, "bold" if selected else "normal"), fg="#5a4636", bg="white")
+                           font=(FONT_FAMILY, 9, "bold" if selected else "normal"), fg="#5a4636", bg="white")
             cap.pack(pady=(0, 6))
             for w in (cell, inner, lab, cap):
                 w.bind("<Button-1>", lambda e, k=key: self.pick(k))
-                w.bind("<Button-3>", lambda e, k=key: self.context(e, k))
+                for event in CONTEXT_EVENTS:
+                    w.bind(event, lambda e, k=key: self.context(e, k))
                 w.bind("<Double-Button-1>", lambda e, k=key: self.rename(k))
 
     def pick(self, key):
@@ -1147,10 +1201,11 @@ class Picker:
                 except Exception:
                     pass
         if bad:
+            converter = "미리보기에서 열고 '파일 → 내보내기 → PNG'" if MAC else "그림판에서 열고 '다른 이름으로 저장 → PNG'"
             messagebox.showwarning("캐릭터 변경",
                                    "이 그림은 추가하지 못했어요:\n" + "\n".join(bad) +
                                    "\n\nPNG 또는 GIF 그림만 쓸 수 있어요.\n"
-                                   "JPG 는 그림판에서 열어 '다른 이름으로 저장 → PNG' 로 바꿔 주세요.",
+                                   f"JPG는 {converter}로 바꿔 주세요.",
                                    parent=self.top)
         if added:
             self.build()
@@ -1176,7 +1231,7 @@ class Picker:
             self.build()
 
     def context(self, e, key):
-        m = tk.Menu(self.top, tearoff=0, font=("Malgun Gothic", 10))
+        m = tk.Menu(self.top, tearoff=0, font=(FONT_FAMILY, 10))
         m.add_command(label="이름 바꾸기", command=lambda: self.rename(key))
         if key != BUILTIN:
             m.add_command(label="'%s' 삭제" % char_name(key), command=lambda: self.delete(key))
@@ -1234,7 +1289,7 @@ class DecorWindow:
         top.protocol("WM_DELETE_WINDOW", self.close)
         if self.key == BUILTIN and not os.path.exists(source_path(BUILTIN)):
             tk.Label(top, text="기본 캐릭터는 꾸미기 준비 파일(frames\\base.png)이 없어서\n꾸밀 수 없어요.",
-                     bg=self.BG, font=("Malgun Gothic", 10)).pack(padx=20, pady=20)
+                     bg=self.BG, font=(FONT_FAMILY, 10)).pack(padx=20, pady=20)
             return
         self.base = still_source(self.key, self.size, app.bg_on())
         items, effect, places = entry_items(self.work, self.key)
@@ -1261,7 +1316,7 @@ class DecorWindow:
                             highlightbackground="#e6d6bf", cursor="fleur")
         self.pv.pack()
         tk.Label(left, text="고른 소품을 드래그해서 옮기세요\n(방향키로 1칸씩)", bg=self.BG,
-                 fg="#8a7360", font=("Malgun Gothic", 9)).pack(pady=(6, 0))
+                 fg="#8a7360", font=(FONT_FAMILY, 9)).pack(pady=(6, 0))
         self.pv.bind("<ButtonPress-1>", self.on_press)
         self.pv.bind("<B1-Motion>", self.on_drag)
         for k, d in (("<Left>", (-1, 0)), ("<Right>", (1, 0)), ("<Up>", (0, -1)), ("<Down>", (0, 1))):
@@ -1269,7 +1324,7 @@ class DecorWindow:
 
         right = tk.Frame(body, bg=self.BG)
         right.pack(side="left", padx=(6, 10), pady=6, anchor="n")
-        self.items_title = tk.Label(right, bg=self.BG, fg="#5a4636", font=("Malgun Gothic", 10, "bold"))
+        self.items_title = tk.Label(right, bg=self.BG, fg="#5a4636", font=(FONT_FAMILY, 10, "bold"))
         self.items_title.pack(anchor="w")
         self.items_box = tk.Frame(right, bg=self.BG)
         self.items_box.pack(anchor="w", pady=(4, 4))
@@ -1277,7 +1332,7 @@ class DecorWindow:
         self.theme_row.pack(anchor="w", pady=(0, 8))
 
         tk.Label(right, text="착용 중  (눌러서 조절할 소품 고르기)", bg=self.BG, fg="#5a4636",
-                 font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
+                 font=(FONT_FAMILY, 10, "bold")).pack(anchor="w")
         self.worn = tk.Frame(right, bg=self.BG)
         self.worn.pack(anchor="w", pady=(4, 4), fill="x")
         ctl = tk.Frame(right, bg=self.BG)
@@ -1285,28 +1340,28 @@ class DecorWindow:
         for txt, cmd in (("작게", lambda: self.scale(1 / 1.1)), ("크게", lambda: self.scale(1.1)),
                          ("↺", lambda: self.rotate(-6)), ("↻", lambda: self.rotate(6)),
                          ("처음 위치로", self.reset), ("모두 벗기", self.clear_all)):
-            tk.Button(ctl, text=txt, command=cmd, font=("Malgun Gothic", 9), bg="white", relief="groove",
+            tk.Button(ctl, text=txt, command=cmd, font=(FONT_FAMILY, 9), bg="white", relief="groove",
                       padx=6).pack(side="left", padx=2)
 
         auto = tk.Frame(right, bg=self.BG)
         auto.pack(anchor="w", pady=(0, 2))
         tk.Label(auto, text="자동 꾸미기", bg=self.BG, fg="#5a4636",
-                 font=("Malgun Gothic", 10, "bold")).pack(side="left")
+                 font=(FONT_FAMILY, 10, "bold")).pack(side="left")
         labels = [lab for _, lab in AUTO_MODES]
         cur = dict(AUTO_MODES)[auto_mode(self.work)]
         self.auto_var = tk.StringVar(value=cur)
         om = tk.OptionMenu(auto, self.auto_var, *labels, command=self.on_auto)
-        om.config(font=("Malgun Gothic", 9), bg="white", relief="groove", highlightthickness=0)
-        om["menu"].config(font=("Malgun Gothic", 9))
+        om.config(font=(FONT_FAMILY, 9), bg="white", relief="groove", highlightthickness=0)
+        om["menu"].config(font=(FONT_FAMILY, 9))
         om.pack(side="left", padx=6)
         tk.Label(right, text="꾸미기를 비워둔 캐릭터만 날짜에 맞춰 알아서 꾸며줘요.", bg=self.BG,
-                 fg="#8a7360", font=("Malgun Gothic", 8)).pack(anchor="w", pady=(0, 10))
+                 fg="#8a7360", font=(FONT_FAMILY, 8)).pack(anchor="w", pady=(0, 10))
 
         btns = tk.Frame(right, bg=self.BG)
         btns.pack(anchor="e", fill="x", pady=(0, 6))
-        tk.Button(btns, text="닫기", command=self.close, font=("Malgun Gothic", 10), bg="white",
+        tk.Button(btns, text="닫기", command=self.close, font=(FONT_FAMILY, 10), bg="white",
                   relief="groove", padx=12).pack(side="right", padx=(6, 0))
-        tk.Button(btns, text="적용", command=self.apply, font=("Malgun Gothic", 10, "bold"), bg=self.SEL,
+        tk.Button(btns, text="적용", command=self.apply, font=(FONT_FAMILY, 10, "bold"), bg=self.SEL,
                   relief="groove", padx=16).pack(side="right")
 
         self.thumbs = []
@@ -1354,7 +1409,7 @@ class DecorWindow:
         for name in [t[0] for t in THEMES] + [self.MINE]:
             sel = name == self.theme
             b = tk.Label(self.tabs, text=name, bg=self.SEL if sel else "white", fg="#5a4636", cursor="hand2",
-                         font=("Malgun Gothic", 9, "bold" if sel else "normal"), padx=8, pady=3,
+                         font=(FONT_FAMILY, 9, "bold" if sel else "normal"), padx=8, pady=3,
                          highlightthickness=1, highlightbackground="#e6d6bf")
             b.pack(side="left", padx=2)
             b.bind("<Button-1>", lambda e, n=name: self.set_theme(n))
@@ -1370,7 +1425,7 @@ class DecorWindow:
         self.thumbs = []
         t = theme_by_name(self.theme)
         if t:
-            names = [i for i in t[1] if os.path.exists(os.path.join(ACC_DIR, i))]
+            names = [i for i in t[1] if os.path.exists(accessory_path(i))]
             self.items_title.config(text="%s 소품  (누르면 입고, 다시 누르면 벗어요)" % self.theme)
         else:
             names = custom_accessories() + ["+"]
@@ -1386,15 +1441,15 @@ class DecorWindow:
             inner.pack(padx=2, pady=2)
             inner.pack_propagate(False)
             if item == "+":
-                lab = tk.Label(inner, text="+", bg="white", fg="#c9a87c", font=("Malgun Gothic", 22))
-                cap = tk.Label(inner, text="소품 추가", bg="white", fg="#8a7360", font=("Malgun Gothic", 8))
+                lab = tk.Label(inner, text="+", bg="white", fg="#c9a87c", font=(FONT_FAMILY, 22))
+                cap = tk.Label(inner, text="소품 추가", bg="white", fg="#8a7360", font=(FONT_FAMILY, 8))
             else:
-                img = thumbnail_file(os.path.join(ACC_DIR, item), 50)
+                img = thumbnail_file(accessory_path(item), 50)
                 self.thumbs.append(img)
                 lab = tk.Label(inner, image=img, bg="white") if img else tk.Label(inner, text="?", bg="white")
                 nm = os.path.splitext(item)[0]
                 cap = tk.Label(inner, text=(nm if len(nm) <= 6 else nm[:5] + "…"), bg="white", fg="#5a4636",
-                               font=("Malgun Gothic", 8, "bold" if on else "normal"))
+                               font=(FONT_FAMILY, 8, "bold" if on else "normal"))
             lab.pack(expand=True)
             cap.pack(pady=(0, 3))
             for w in (cell, inner, lab, cap):
@@ -1403,18 +1458,19 @@ class DecorWindow:
                 else:
                     w.bind("<Button-1>", lambda e, it=item: self.toggle(it))
                     if t is None:
-                        w.bind("<Button-3>", lambda e, it=item: self.context(e, it))
+                        for event in CONTEXT_EVENTS:
+                            w.bind(event, lambda e, it=item: self.context(e, it))
         if t and (t[2] or t[3]):
             if t[2]:
                 on = self.entry().get("effect") == t[2]
                 fx = tk.Label(self.theme_row, text=("✔ " if on else "") + "%s 날리기" % t[2], cursor="hand2",
-                              bg=self.SEL if on else "white", fg="#5a4636", font=("Malgun Gothic", 9),
+                              bg=self.SEL if on else "white", fg="#5a4636", font=(FONT_FAMILY, 9),
                               padx=8, pady=3, highlightthickness=1, highlightbackground="#e6d6bf")
                 fx.pack(side="left", padx=(0, 6))
                 fx.bind("<Button-1>", lambda e, n=t[2]: self.toggle_effect(n))
             if t[3]:
                 tk.Button(self.theme_row, text="이 테마 한 번에 입히기", command=lambda th=t: self.wear_theme(th),
-                          font=("Malgun Gothic", 9, "bold"), bg="white", relief="groove",
+                          font=(FONT_FAMILY, 9, "bold"), bg="white", relief="groove",
                           padx=8).pack(side="left")
 
     def build_worn(self):
@@ -1430,18 +1486,18 @@ class DecorWindow:
             act = it == self.active
             chip = tk.Label(self.worn, text="%s: %s" % (SLOT_NAMES[slot], os.path.splitext(it)[0]),
                             bg=self.ACT if act else "white", fg="#5a4636", cursor="hand2",
-                            font=("Malgun Gothic", 9, "bold" if act else "normal"), padx=6, pady=2,
+                            font=(FONT_FAMILY, 9, "bold" if act else "normal"), padx=6, pady=2,
                             highlightthickness=1, highlightbackground="#e6d6bf")
             chip.pack(side="left", padx=2)
             chip.bind("<Button-1>", lambda ev, i=it: self.set_active(i))
         if e.get("effect"):
             any_worn = True
             tk.Label(self.worn, text="효과: %s" % e["effect"], bg="white", fg="#5a4636",
-                     font=("Malgun Gothic", 9), padx=6, pady=2, highlightthickness=1,
+                     font=(FONT_FAMILY, 9), padx=6, pady=2, highlightthickness=1,
                      highlightbackground="#e6d6bf").pack(side="left", padx=2)
         if not any_worn:
             tk.Label(self.worn, text="(아직 없어요)", bg=self.BG, fg="#8a7360",
-                     font=("Malgun Gothic", 9)).pack(side="left")
+                     font=(FONT_FAMILY, 9)).pack(side="left")
 
     def fx_image(self, name):
         if name not in self.fx_imgs:
@@ -1574,7 +1630,7 @@ class DecorWindow:
                 continue
             stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "accessory"
             dest, n = os.path.join(ACC_DIR, stem + ext.lower()), 2
-            while os.path.exists(dest):
+            while os.path.exists(accessory_path(os.path.basename(dest))):
                 dest = os.path.join(ACC_DIR, "%s (%d)%s" % (stem, n, ext.lower()))
                 n += 1
             try:
@@ -1593,7 +1649,7 @@ class DecorWindow:
             self.refresh()
 
     def context(self, ev, item):
-        m = tk.Menu(self.top, tearoff=0, font=("Malgun Gothic", 10))
+        m = tk.Menu(self.top, tearoff=0, font=(FONT_FAMILY, 10))
         cur = acc_info(item, self.work)["slot"]
         for slot in ("head", "pin", "body", "side", "ground"):
             m.add_command(label=("✔ " if slot == cur else "   ") + "%s에 두기" % SLOT_NAMES[slot],
@@ -1668,11 +1724,8 @@ class Bubble:
         """buttons: [(label, callback, primary)] - a bubble with buttons stays until a button is pressed."""
         self.app = app
         top = self.top = tk.Toplevel(app.root)
-        top.overrideredirect(True)
-        top.attributes("-topmost", True)
-        top.config(bg=KEY)
-        top.attributes("-transparentcolor", KEY)
-        c = tk.Canvas(top, bg=KEY, highlightthickness=0, bd=0, cursor="hand2")
+        configure_overlay(top)
+        c = tk.Canvas(top, bg=WINDOW_BG, highlightthickness=0, bd=0, cursor="hand2")
         tid = c.create_text(18, 13, text=text, anchor="nw", width=280, font=FONT, fill=TEXT)
         x1, y1, x2, y2 = c.bbox(tid)
         w, h = max(x2 + 18, 120), y2 + 15
@@ -1680,7 +1733,7 @@ class Bubble:
         if buttons:
             bx = 0
             for label, cb, primary in buttons:
-                t = c.create_text(0, 0, text=label, font=("Malgun Gothic", 9, "bold" if primary else "normal"),
+                t = c.create_text(0, 0, text=label, font=(FONT_FAMILY, 9, "bold" if primary else "normal"),
                                   fill=TEXT, anchor="nw")
                 tb = c.bbox(t)
                 made.append((t, tb[2] - tb[0] + 22, cb, primary))
@@ -1690,7 +1743,7 @@ class Bubble:
         shape = round_rect(c, 2, 2, w - 3, h - 3, 16, fill="#fffdf6", outline=LINE, width=2)
         c.tag_raise(tid, shape)
         if footer:
-            c.create_text(18, h - 22, text=footer, anchor="w", font=("Malgun Gothic", 8), fill="#a08a76")
+            c.create_text(18, h - 22, text=footer, anchor="w", font=(FONT_FAMILY, 8), fill="#a08a76")
         x = w - 14
         for t, bw, cb, primary in reversed(made):
             x0 = x - bw
@@ -1710,6 +1763,8 @@ class Bubble:
         self.alive = True
         self.has_buttons = bool(buttons)
         self.place()
+        if MAC:
+            top.deiconify()
         if seconds and seconds > 0:
             top.after(seconds * 1000, self.close)
 
@@ -1746,10 +1801,7 @@ class CuteMenu:
         self.app = app
         self.alive = True
         top = self.top = tk.Toplevel(app.root)
-        top.overrideredirect(True)
-        top.attributes("-topmost", True)
-        top.config(bg=KEY)
-        top.attributes("-transparentcolor", KEY)
+        configure_overlay(top)
         items = [("memo", "메모 열기", app.open_memo),
                  ("calendar", "오늘 일정", app.menu_today),
                  ("decor", "꾸미기", app.open_decor),
@@ -1759,14 +1811,14 @@ class CuteMenu:
         head_h, row_h, tog_h, foot_h = 52, 36, 40, 52
         W = self.W
         H = head_h + 6 + len(items) * row_h + 8 + tog_h * 2 + foot_h
-        c = self.c = tk.Canvas(top, width=W, height=H, bg=KEY, highlightthickness=0, bd=0)
+        c = self.c = tk.Canvas(top, width=W, height=H, bg=WINDOW_BG, highlightthickness=0, bd=0)
         c.pack()
         round_rect(c, 2, 2, W - 3, H - 3, 18, fill=self.BG, outline=LINE, width=2)
         # header: little picture of the character + "토리의 메뉴"
         self.head_h = head_h
         self.head_img = None
         self.head_text = c.create_text(56, head_h // 2 + 2, text="", anchor="w",
-                                       font=("Malgun Gothic", 11, "bold"), fill=TEXT)
+                                       font=(FONT_FAMILY, 11, "bold"), fill=TEXT)
         self.refresh_header()
         c.create_line(16, head_h + 2, W - 16, head_h + 2, fill="#e6d6bf", dash=(3, 3))
         y = head_h + 6
@@ -1780,7 +1832,10 @@ class CuteMenu:
         self.toggle_row("tog_rand", y, tog_h, "캐릭터 랜덤으로 바꾸기", app.random_on, self.toggle_random)
         self.shuffle_button(self.W - 62 - 20, y + tog_h // 2 - 1)
         y += tog_h
-        self.toggle_row("tog", y, tog_h, "컴퓨터 켤 때 자동 실행", autostart_enabled, self.toggle_autostart)
+        if MAC:
+            self.row(len(items), y, tog_h, "settings", "로그인 시 자동 실행 설정", open_login_items)
+        else:
+            self.toggle_row("tog", y, tog_h, "컴퓨터 켤 때 자동 실행", autostart_enabled, self.toggle_autostart)
         y += tog_h
         # footer buttons
         half = (W - 16 * 2 - 8) // 2
@@ -1791,6 +1846,8 @@ class CuteMenu:
         x = max(wa[0] + 4, min(x, wa[2] - W - 4))
         yy = max(wa[1] + 4, min(app.root.winfo_pointery() - H // 2, wa[3] - H - 4))
         top.geometry("%dx%d+%d+%d" % (W, H, x, yy))
+        if MAC:
+            top.deiconify()
         top.bind("<Escape>", lambda e: self.close())
         top.bind("<F5>", lambda e: self.shuffle())
         top.bind("<FocusOut>", lambda e: top.after(120, self.close_if_unfocused))
@@ -1816,7 +1873,7 @@ class CuteMenu:
         img = ui_icon(icon)
         if img:
             c.create_image(30, y + h // 2, image=img, tags=(tag,))
-        c.create_text(52, y + h // 2, text=label, anchor="w", font=("Malgun Gothic", 10), fill=TEXT, tags=(tag,))
+        c.create_text(52, y + h // 2, text=label, anchor="w", font=(FONT_FAMILY, 10), fill=TEXT, tags=(tag,))
         c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
         c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill=self.BG), c.config(cursor="")))
         c.tag_bind(tag, "<Button-1>", lambda e: self.run(cmd))
@@ -1829,7 +1886,7 @@ class CuteMenu:
         if img:
             c.create_image(x + 22, y + h // 2, image=img, tags=(tag,))
             tx = x + 22 + (w - 22) // 2
-        c.create_text(tx, y + h // 2, text=label, font=("Malgun Gothic", 9, "bold"), fill=TEXT, tags=(tag,))
+        c.create_text(tx, y + h // 2, text=label, font=(FONT_FAMILY, 9, "bold"), fill=TEXT, tags=(tag,))
         c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
         c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfig(bg, fill=fill), c.config(cursor="")))
         c.tag_bind(tag, "<Button-1>", lambda e: self.run(cmd))
@@ -1838,7 +1895,7 @@ class CuteMenu:
         c = self.c
         bg = round_rect(c, 8, y + 2, self.W - 8, y + h - 4, 10, fill=self.BG, outline="", tags=(tag,))
         c.create_text(20, y + h // 2 - 1, text=label, anchor="w",
-                      font=("Malgun Gothic", 9), fill=TEXT, tags=(tag,))
+                      font=(FONT_FAMILY, 9), fill=TEXT, tags=(tag,))
         self.switches[tag] = {"y": y, "is_on": is_on, "items": []}
         self.draw_switch(tag)
         c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfig(bg, fill=self.HOV), c.config(cursor="hand2")))
@@ -1924,9 +1981,9 @@ class SettingsWindow:
         top.config(bg=self.BG)
         top.resizable(False, False)
         top.protocol("WM_DELETE_WINDOW", self.close)
-        f_title = ("Malgun Gothic", 10, "bold")
-        f = ("Malgun Gothic", 9)
-        self.memo = tk.StringVar(value=cfg.get("MEMO", "auto").lower())
+        f_title = (FONT_FAMILY, 10, "bold")
+        f = (FONT_FAMILY, 9)
+        self.memo = tk.StringVar(value="builtin" if MAC else cfg.get("MEMO", "auto").lower())
         self.size = tk.IntVar(value=app.int_cfg("SIZE", MAX_SIZE))
         self.animate = tk.BooleanVar(value=cfg.get("ANIMATE", "on").lower() != "off")
         self.motion = tk.BooleanVar(value=cfg.get("MOTION", "on").lower() != "off")
@@ -1947,19 +2004,20 @@ class SettingsWindow:
             tk.Checkbutton(top, text=text, variable=var, bg=self.BG, activebackground=self.BG,
                            font=f, anchor="w").pack(anchor="w", padx=24)
 
-        section("메모")
-        for val, text in (("sticky", "윈도우 스티커 메모 열기"), ("builtin", "위젯 전용 메모장 열기"),
-                          ("auto", "자동 (스티커 메모가 있으면 그걸로)")):
-            tk.Radiobutton(top, text=text, value=val, variable=self.memo, bg=self.BG, activebackground=self.BG,
-                           font=f, anchor="w").pack(anchor="w", padx=24)
+        if not MAC:
+            section("메모")
+            for val, text in (("sticky", "윈도우 스티커 메모 열기"), ("builtin", "위젯 전용 메모장 열기"),
+                              ("auto", "자동 (스티커 메모가 있으면 그걸로)")):
+                tk.Radiobutton(top, text=text, value=val, variable=self.memo, bg=self.BG, activebackground=self.BG,
+                               font=f, anchor="w").pack(anchor="w", padx=24)
         section("캐릭터")
         row = tk.Frame(top, bg=self.BG)
         row.pack(anchor="w", padx=24, pady=(2, 2))
         tk.Label(row, text="크기", bg=self.BG, font=f).pack(side="left")
-        tk.Label(row, text="작게", bg=self.BG, fg="#8a7360", font=("Malgun Gothic", 8)).pack(side="left", padx=(10, 2))
+        tk.Label(row, text="작게", bg=self.BG, fg="#8a7360", font=(FONT_FAMILY, 8)).pack(side="left", padx=(10, 2))
         tk.Scale(row, from_=120, to=260, resolution=10, orient="horizontal", variable=self.size, length=170,
                  showvalue=False, bg=self.BG, highlightthickness=0, troughcolor="#f0e4d2").pack(side="left")
-        tk.Label(row, text="크게", bg=self.BG, fg="#8a7360", font=("Malgun Gothic", 8)).pack(side="left", padx=2)
+        tk.Label(row, text="크게", bg=self.BG, fg="#8a7360", font=(FONT_FAMILY, 8)).pack(side="left", padx=2)
         check("멈춘 그림도 통통 움직이게 만들기", self.animate)
         check("평소에 둥실둥실 떠 있기", self.motion)
         check("그림 배경 자동으로 지우기", self.bg)
@@ -1980,30 +2038,33 @@ class SettingsWindow:
         om["menu"].config(font=f)
         om.pack(side="left", padx=4)
         how = tk.Label(cal2, text="주소 찾는 방법", bg=self.BG, fg="#a08a76", cursor="hand2",
-                       font=("Malgun Gothic", 8, "underline"))
+                       font=(FONT_FAMILY, 8, "underline"))
         how.pack(side="left", padx=6)
         how.bind("<Button-1>", lambda e: self.cal_help())
-        self.test_lbl = tk.Label(top, text="", bg=self.BG, fg="#5a4636", font=("Malgun Gothic", 8),
+        self.test_lbl = tk.Label(top, text="", bg=self.BG, fg="#5a4636", font=(FONT_FAMILY, 8),
                                  justify="left", wraplength=330)
         self.test_lbl.pack(anchor="w", padx=24, pady=(2, 0))
         section("기타")
         check("켤 때 인사하기", self.greet)
-        check("컴퓨터 켤 때 자동 실행", self.auto)
+        if not MAC:
+            check("컴퓨터 켤 때 자동 실행", self.auto)
         links = tk.Frame(top, bg=self.BG)
         links.pack(anchor="w", padx=24, pady=(6, 0))
-        for text, cmd in (("위젯 폴더 열기", lambda: os.startfile(DIR)), ("고급: 설정 파일 직접 열기", app.open_settings),
-                          ("업데이트 확인", lambda: (self.close(), app.update_check(manual=True)))):
+        actions = [("위젯 폴더 열기", lambda: open_folder(DIR)), ("고급: 설정 파일 직접 열기", app.open_settings)]
+        if not MAC:
+            actions.append(("업데이트 확인", lambda: (self.close(), app.update_check(manual=True))))
+        for text, cmd in actions:
             lk = tk.Label(links, text=text, bg=self.BG, fg="#a08a76", cursor="hand2",
-                          font=("Malgun Gothic", 8, "underline"))
+                          font=(FONT_FAMILY, 8, "underline"))
             lk.pack(side="left", padx=(0, 12))
             lk.bind("<Button-1>", lambda e, c=cmd: c())
         btns = tk.Frame(top, bg=self.BG)
         btns.pack(fill="x", padx=18, pady=14)
         tk.Label(btns, text="버전 %s" % APP_VERSION, bg=self.BG, fg="#b8a690",
-                 font=("Malgun Gothic", 8)).pack(side="left")
-        tk.Button(btns, text="취소", command=self.close, font=("Malgun Gothic", 10), bg="white",
+                 font=(FONT_FAMILY, 8)).pack(side="left")
+        tk.Button(btns, text="취소", command=self.close, font=(FONT_FAMILY, 10), bg="white",
                   relief="groove", padx=12).pack(side="right", padx=(6, 0))
-        tk.Button(btns, text="저장", command=self.save, font=("Malgun Gothic", 10, "bold"), bg="#ffd27a",
+        tk.Button(btns, text="저장", command=self.save, font=(FONT_FAMILY, 10, "bold"), bg="#ffd27a",
                   relief="groove", padx=16).pack(side="right")
         top.update_idletasks()
         r = app.root
@@ -2089,7 +2150,7 @@ class Memo:
         top.attributes("-topmost", True)
         top.config(bg="#fff7c8")
         top.geometry("300x320")
-        self.text = tk.Text(top, wrap="word", font=("Malgun Gothic", 11), bg="#fff7c8",
+        self.text = tk.Text(top, wrap="word", font=(FONT_FAMILY, 11), bg="#fff7c8",
                             bd=0, padx=10, pady=10, undo=True, relief="flat")
         self.text.pack(fill="both", expand=True)
         try:
@@ -2102,7 +2163,7 @@ class Memo:
         # <<Modified>> also fires for Korean IME commits, unlike key events
         self.text.bind("<<Modified>>", self.on_modified)
         self.text.bind("<FocusOut>", lambda e: self.save())
-        self.text.bind("<Control-s>", lambda e: (self.save(), "break")[1])
+        self.text.bind("<Command-s>" if MAC else "<Control-s>", lambda e: (self.save(), "break")[1])
         top.protocol("WM_DELETE_WINDOW", self.close)
         self.alive = True
         self.autosave()
@@ -2160,11 +2221,11 @@ class App:
     def __init__(self):
         self.root = r = tk.Tk()
         r.title("캐릭터 위젯")
-        r.overrideredirect(True)
-        r.attributes("-topmost", True)
-        r.config(bg=KEY)
-        r.attributes("-transparentcolor", KEY)
+        configure_overlay(r)
         r.report_callback_exception = self.on_error
+        if MAC:
+            r.createcommand("::tk::mac::Quit", self.quit)
+            r.protocol("WM_DELETE_WINDOW", self.quit)
 
         self.cfg, self.urls = {}, []
         self.load_config()
@@ -2197,7 +2258,7 @@ class App:
         self.effect = (self.dec_for(self.char_key) or {}).get("effect")
         w, h = self.canvas_size()
         self.cw, self.ch = w, h
-        self.label = tk.Canvas(r, width=w, height=h, bg=KEY, highlightthickness=0, bd=0, cursor="hand2")
+        self.label = tk.Canvas(r, width=w, height=h, bg=WINDOW_BG, highlightthickness=0, bd=0, cursor="hand2")
         self.label.pack()
         if self.placeholder:
             self.draw_placeholder()
@@ -2206,11 +2267,14 @@ class App:
         self.setup_effect(self.dec_for(self.char_key))
         x, y = self.load_pos(w, h)
         r.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        if MAC:
+            r.deiconify()
 
         self.label.bind("<ButtonPress-1>", self.on_down)
         self.label.bind("<B1-Motion>", self.on_move)
         self.label.bind("<ButtonRelease-1>", self.on_up)
-        self.label.bind("<Button-3>", self.on_menu)
+        for event in CONTEXT_EVENTS:
+            self.label.bind(event, self.on_menu)
         r.bind("<F5>", lambda e: self.random_now())
         self.autostart = tk.BooleanVar(value=autostart_enabled())
         self.cute_menu = None
@@ -2235,7 +2299,8 @@ class App:
         r.after(60 * 1000, self.random_tick)
         self.uq = queue.Queue()
         self.update_busy = False
-        r.after(90 * 1000, self.update_check)
+        if not MAC:
+            r.after(90 * 1000, self.update_check)
         self.animate()
         r.after(2500, lambda: self.refresh(True))
         r.after(30000, self.tick)
@@ -2397,10 +2462,10 @@ class App:
         self.ph_items = [
             round_rect(c, x0, y0, x1, y1, 18, fill="#fffdf8", outline=""),
             round_rect(c, x0, y0, x1, y1, 18, fill="", outline="#c8b49a", width=2, dash=(6, 4)),
-            c.create_text(w // 2, h // 2 - 30, text="+", font=("Malgun Gothic", 30), fill="#c8a882"),
-            c.create_text(w // 2, h // 2 + 14, text="캐릭터를\n등록해 주세요!", font=("Malgun Gothic", 10, "bold"),
+            c.create_text(w // 2, h // 2 - 30, text="+", font=(FONT_FAMILY, 30), fill="#c8a882"),
+            c.create_text(w // 2, h // 2 + 14, text="캐릭터를\n등록해 주세요!", font=(FONT_FAMILY, 10, "bold"),
                           fill=TEXT, justify="center"),
-            c.create_text(w // 2, h // 2 + 48, text="클릭해서 그림 고르기", font=("Malgun Gothic", 8), fill="#a08a76"),
+            c.create_text(w // 2, h // 2 + 48, text="클릭해서 그림 고르기", font=(FONT_FAMILY, 8), fill="#a08a76"),
         ]
 
     def show_placeholder(self):
@@ -2560,7 +2625,7 @@ class App:
             self.open_memo()
 
     def build_menu(self):
-        m = tk.Menu(self.root, tearoff=0, font=("Malgun Gothic", 10))
+        m = tk.Menu(self.root, tearoff=0, font=(FONT_FAMILY, 10))
         m.add_command(label="메모 열기", command=self.open_memo)
         m.add_separator()
         m.add_command(label="캐릭터 변경", command=self.open_picker)
@@ -2679,11 +2744,15 @@ class App:
 
     def open_settings(self):
         try:
-            subprocess.Popen(["notepad.exe", os.path.join(DIR, "settings.ini")])
+            path = os.path.join(DIR, "settings.ini")
+            command = ["/usr/bin/open", "-t", path] if MAC else ["notepad.exe", path]
+            subprocess.Popen(command)
         except Exception as ex:
-            log("notepad: %s" % ex)
+            log("open settings: %s" % ex)
 
     def quit(self):
+        if self.memo and self.memo.alive:
+            self.memo.save()
         self.save_pos()
         self.root.destroy()
 
@@ -2694,16 +2763,17 @@ class App:
     # ---------- memo
     def open_memo(self):
         self.do_hop()
-        self.load_config()
-        mode = self.cfg.get("MEMO", "auto").lower()
-        if self.sticky is None:
-            self.sticky = sticky_installed()
-        if mode == "sticky" or (mode == "auto" and self.sticky):
-            try:
-                subprocess.Popen(["explorer.exe", STICKY_APP])
-                return
-            except Exception as ex:
-                log("sticky: %s" % ex)
+        if not MAC:
+            self.load_config()
+            mode = self.cfg.get("MEMO", "auto").lower()
+            if self.sticky is None:
+                self.sticky = sticky_installed()
+            if mode == "sticky" or (mode == "auto" and self.sticky):
+                try:
+                    subprocess.Popen(["explorer.exe", STICKY_APP])
+                    return
+                except Exception as ex:
+                    log("sticky: %s" % ex)
         if self.memo and self.memo.alive:
             self.memo.close()
             return
@@ -2937,38 +3007,68 @@ class App:
 
 
 def main():
+    if MAC:
+        os.makedirs(DIR, mode=0o700, exist_ok=True)
+        # Bundled python.org OpenSSL may default to a certificate file in the build machine's framework.
+        import ssl
+        if ssl.get_default_verify_paths().cafile is None:
+            os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/cert.pem")
+    try:
+        with open(os.path.join(DIR, "launch.log"), "a", encoding="utf-8") as f:
+            f.write("%s start  python=%s  exe=%s\n" % (datetime.now().isoformat(timespec="seconds"),
+                                                       sys.version.split()[0], sys.executable))
+    except OSError:
+        pass
     lock = single_instance()
     if lock is None:
         try:
             root = tk.Tk()
             root.withdraw()
             root.attributes("-topmost", True)
-            messagebox.showinfo("캐릭터 위젯",
-                                "캐릭터 위젯이 이미 켜져 있어요!\n\n"
-                                                                "화면에서 캐릭터가 안 보이면 Ctrl+Shift+Esc(작업 관리자)에서\n"
-                                "'Python' 또는 'pythonw' 를 작업 끝내기 한 뒤 다시 실행해 주세요.")
+            help_text = ("화면에서 캐릭터가 안 보이면 활동 모니터에서 CharacterWidget을 종료한 뒤 다시 실행해 주세요."
+                         if MAC else "화면에서 캐릭터가 안 보이면 Ctrl+Shift+Esc(작업 관리자)에서\n"
+                                     "'Python' 또는 'pythonw' 를 작업 끝내기 한 뒤 다시 실행해 주세요.")
+            messagebox.showinfo("캐릭터 위젯", "캐릭터 위젯이 이미 켜져 있어요!\n\n" + help_text)
             root.destroy()
         except Exception:
             pass
         return
     try:
+        if MAC:
+            settings = os.path.join(DIR, "settings.ini")
+            if not os.path.exists(settings):
+                shutil.copyfile(os.path.join(ASSET_DIR, "settings.ini"), settings)
         app = App()
         app.run()
         if getattr(app, "restart_flag", False):
-            try:
-                ctypes.windll.kernel32.CloseHandle(lock)
-            except Exception:
-                pass
-            subprocess.Popen([pythonw_path(), os.path.abspath(__file__)], cwd=DIR, close_fds=True)
+            if MAC:
+                command = [sys.executable]
+                env = os.environ.copy()
+                if getattr(sys, "frozen", False):
+                    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+                else:
+                    command.append(os.path.abspath(__file__))
+                lock.close()
+                subprocess.Popen(command, cwd=DIR, env=env, close_fds=True)
+            else:
+                try:
+                    ctypes.windll.kernel32.CloseHandle(lock)
+                except Exception:
+                    pass
+                subprocess.Popen([pythonw_path(), os.path.abspath(__file__)], cwd=DIR, close_fds=True)
     except Exception:
         err = traceback.format_exc()
         log(err)
         try:
             root = tk.Tk()
             root.withdraw()
-            messagebox.showerror("캐릭터 위젯", "위젯 실행 중 오류가 났어요.\n같은 폴더의 error.log 파일을 확인해 주세요.\n\n" + err.strip().splitlines()[-1])
+            messagebox.showerror("캐릭터 위젯", "위젯 실행 중 오류가 났어요.\n%s의 error.log 파일을 확인해 주세요.\n\n%s"
+                                 % (DIR, err.strip().splitlines()[-1]))
         except Exception:
             pass
+    finally:
+        if MAC:
+            lock.close()
 
 
 if __name__ == "__main__":
