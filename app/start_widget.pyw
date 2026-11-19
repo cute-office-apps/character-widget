@@ -156,6 +156,65 @@ BUILTIN_NAME = "기본 캐릭터"
 IMG_EXT = (".png", ".gif")
 UI_DIR = os.path.join(DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
+
+# ---------- 자동 업데이트
+APP_VERSION = "1.1"
+UPDATE_BASE = "https://raw.githubusercontent.com/ckgpdud/character-widget/main/"
+UPDATE_ZIP = "CharacterWidget_v1.0.zip"          # 기본판 zip 안의 app\ 파일만 바꿔요
+UPDATE_KEEP = {"settings.ini", "decor.json", "names.json", "state.json", "memo.txt", "pos.txt",
+               "character_choice.txt", "error.log", "launch.log", "diag.txt"}
+
+
+def version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split("."))
+    except Exception:
+        return (0,)
+
+
+def fetch_bytes(url, limit=5 * 1024 * 1024):
+    sep = "&" if "?" in url else "?"
+    req = urllib.request.Request(url + sep + "t=%d" % int(time.time()),
+                                 headers={"User-Agent": "CharacterWidget/" + APP_VERSION})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("파일이 너무 커요")
+    return data
+
+
+def apply_update_zip(data):
+    """기본판 zip 에서 app\\ 아래 파일만 위젯 폴더에 덮어써요. 내 설정·메모·캐릭터는 건드리지 않아요."""
+    import io
+    import zipfile
+    z = zipfile.ZipFile(io.BytesIO(data))
+    prefix = None
+    for n in z.namelist():
+        if n.endswith("/app/start_widget.pyw"):
+            prefix = n[:-len("start_widget.pyw")]
+            break
+    if not prefix:
+        raise ValueError("업데이트 파일 모양이 이상해요")
+    root = os.path.abspath(DIR)
+    count = 0
+    for info in z.infolist():
+        n = info.filename
+        if not n.startswith(prefix) or n.endswith("/"):
+            continue
+        rel = n[len(prefix):]
+        parts = rel.split("/")
+        if parts[0] in ("characters", ".anim") or rel in UPDATE_KEEP or ".." in parts:
+            continue
+        dst = os.path.abspath(os.path.join(root, *parts))
+        if not dst.startswith(root + os.sep):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".new"
+        with open(tmp, "wb") as f:
+            f.write(z.read(info))
+        os.replace(tmp, dst)
+        count += 1
+    return count
 DEFAULT_CHAR = "토리.png"
 ACC_DIR = os.path.join(DIR, "accessories")
 FX_DIR = os.path.join(ACC_DIR, "effects")
@@ -1906,13 +1965,16 @@ class SettingsWindow:
         check("컴퓨터 켤 때 자동 실행", self.auto)
         links = tk.Frame(top, bg=self.BG)
         links.pack(anchor="w", padx=24, pady=(6, 0))
-        for text, cmd in (("위젯 폴더 열기", lambda: os.startfile(DIR)), ("고급: 설정 파일 직접 열기", app.open_settings)):
+        for text, cmd in (("위젯 폴더 열기", lambda: os.startfile(DIR)), ("고급: 설정 파일 직접 열기", app.open_settings),
+                          ("업데이트 확인", lambda: (self.close(), app.update_check(manual=True)))):
             lk = tk.Label(links, text=text, bg=self.BG, fg="#a08a76", cursor="hand2",
                           font=("Malgun Gothic", 8, "underline"))
             lk.pack(side="left", padx=(0, 12))
             lk.bind("<Button-1>", lambda e, c=cmd: c())
         btns = tk.Frame(top, bg=self.BG)
         btns.pack(fill="x", padx=18, pady=14)
+        tk.Label(btns, text="버전 %s" % APP_VERSION, bg=self.BG, fg="#b8a690",
+                 font=("Malgun Gothic", 8)).pack(side="left")
         tk.Button(btns, text="취소", command=self.close, font=("Malgun Gothic", 10), bg="white",
                   relief="groove", padx=12).pack(side="right", padx=(6, 0))
         tk.Button(btns, text="저장", command=self.save, font=("Malgun Gothic", 10, "bold"), bg="#ffd27a",
@@ -2144,6 +2206,9 @@ class App:
         self.root.after(10 * 60 * 1000, self.season_check)
         self.next_random = time.time() + self.random_minutes() * 60
         r.after(60 * 1000, self.random_tick)
+        self.uq = queue.Queue()
+        self.update_busy = False
+        r.after(90 * 1000, self.update_check)
         self.animate()
         r.after(2500, lambda: self.refresh(True))
         r.after(30000, self.tick)
@@ -2663,7 +2728,87 @@ class App:
                 self.fetched(*self.q.get_nowait())
         except queue.Empty:
             pass
+        try:
+            while True:
+                kind, ok, val = self.uq.get_nowait()
+                (self.update_found if kind == "check" else self.update_done)(ok, val)
+        except (queue.Empty, AttributeError):
+            pass
         self.root.after(300, self.poll)
+
+    # ---------- auto update
+    def update_check(self, manual=False):
+        if not manual:
+            self.root.after(6 * 3600 * 1000, self.update_check)   # 6시간마다 다시 확인
+            if self.cfg.get("AUTO_UPDATE", "on").lower() in ("off", "0", "no", "false"):
+                return
+        if self.update_busy:
+            return
+        base = self.cfg.get("UPDATE_BASE") or UPDATE_BASE
+
+        def work():
+            try:
+                v = fetch_bytes(base + "version.txt", 1024).decode("utf-8", "replace").strip()
+                self.uq.put(("check", True, (v, manual)))
+            except Exception as ex:
+                self.uq.put(("check", False, (str(ex), manual)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_found(self, ok, val):
+        v, manual = val
+        if not ok:
+            log("update check: %s" % v)
+            if manual:
+                self.say("업데이트를 확인하지 못했어요.\n인터넷 연결을 확인해 주세요.", 8, False)
+            return
+        if version_tuple(v) <= version_tuple(APP_VERSION):
+            if manual:
+                self.say("지금 최신 버전이에요! (%s)" % APP_VERSION, 5, False)
+            return
+        if not manual and self.state.get("update_later") == "%s/%s" % (v, date.today()):
+            return                                                  # 오늘 '나중에'를 눌렀으면 내일 다시
+        self.ask_update(v)
+
+    def ask_update(self, v):
+        if self.bubble_busy():
+            self.root.after(10000, lambda: self.ask_update(v))
+            return
+
+        def later():
+            self.bubble.close()
+            self.state["update_later"] = "%s/%s" % (v, date.today())
+            save_state(self.state)
+
+        self.say("새 버전(%s)이 나왔어요!\n업데이트할까요?\n(메모·캐릭터·설정은 그대로예요)" % v, 0,
+                 buttons=[("나중에", later, False), ("업데이트", lambda: self.start_update(v), True)])
+
+    def start_update(self, v):
+        if self.bubble:
+            self.bubble.close()
+        self.update_busy = True
+        self.say("업데이트 받는 중…", 60, False)
+        base = self.cfg.get("UPDATE_BASE") or UPDATE_BASE
+
+        def work():
+            try:
+                n = apply_update_zip(fetch_bytes(base + UPDATE_ZIP))
+                self.uq.put(("apply", True, (v, n)))
+            except Exception as ex:
+                self.uq.put(("apply", False, (v, str(ex))))
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_done(self, ok, val):
+        self.update_busy = False
+        v, info = val
+        if not ok:
+            log("update: %s" % info)
+            self.say("앗, 업데이트를 못 했어요…\n잠시 뒤에 다시 해볼게요.\n(%s)" % info, 10, False)
+            return
+        log("updated to %s (%s files)" % (v, info))
+        self.state.pop("update_later", None)
+        save_state(self.state)
+        self.say("업데이트 끝! (%s)\n새 버전으로 다시 시작할게요" % v, 3)
+        self.root.after(2500, self.restart)
 
     def fetched(self, evs, ok, err, announce, diag=None):
         self.fetching = False
