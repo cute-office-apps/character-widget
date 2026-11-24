@@ -8,6 +8,7 @@
 사용법 (Linux, msitools 필요):  python3 tools/build_zips.py
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,7 +40,8 @@ def fetch(name, dest):
 
 def copy_tree(src, dst, skip_dirs=()):
     for root, dirs, files in os.walk(src):
-        dirs[:] = [d for d in dirs if d not in skip_dirs and d != "characters" and d != ".anim"]
+        dirs[:] = [d for d in dirs if d not in skip_dirs and d not in ("characters", ".anim")
+                   and not d.startswith(".update_")]
         rel = os.path.relpath(root, src)
         out = os.path.normpath(os.path.join(dst, rel))
         os.makedirs(out, exist_ok=True)
@@ -73,8 +75,42 @@ def build_plain():
     shutil.rmtree(work, ignore_errors=True)
 
 
+PRIVATE_KEYS = re.compile(r"^[ \t]*(ICAL_URL\d*|UPDATE_BASE)[ \t]*=[ \t]*(\S.*)$", re.M)
+
+
+def check_settings():
+    """app/settings.ini 에 캘린더 비공개 주소 같은 개인 값이 들어 있으면 빌드를 멈춰요."""
+    text = open(os.path.join(REPO, "app", "settings.ini"), encoding="utf-8-sig").read()
+    found = [m.group(1) for m in PRIVATE_KEYS.finditer(text)]
+    if found:
+        raise SystemExit("빌드 중단: app/settings.ini 에 개인 값이 있어요 (%s). 비운 뒤 다시 빌드해 주세요."
+                         % ", ".join(found))
+
+
+def app_version():
+    text = open(os.path.join(REPO, "app", "start_widget.pyw"), encoding="utf-8").read()
+    return re.search(r'^APP_VERSION = "([\d.]+)"', text, re.M).group(1)
+
+
+def write_update_info():
+    """위젯이 읽는 update.json(버전·zip 이름·크기·SHA-256)과 옛 설치본용 version.txt 를 만들어요."""
+    import hashlib
+    import json
+    data = open(os.path.join(REPO, PLAIN_NAME), "rb").read()
+    info = {"version": app_version(), "zip": PLAIN_NAME,
+            "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    with open(os.path.join(REPO, "update.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    with open(os.path.join(REPO, "version.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(info["version"] + "\n")
+    print("update.json", info)
+
+
 def main():
+    check_settings()
     build_plain()
+    write_update_info()
     work = tempfile.mkdtemp()
     stage = os.path.join(work, "stage", TOP)
     rt = os.path.join(stage, "runtime")
