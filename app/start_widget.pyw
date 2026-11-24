@@ -202,14 +202,15 @@ CHOICE_FILE = os.path.join(DIR, "character_choice.txt")
 BUILTIN = "__builtin__"
 BUILTIN_NAME = "기본 캐릭터"
 IMG_EXT = (".png", ".gif")
-MAC_IMPORT_EXT = (".jpg", ".jpeg", ".heic", ".heif", ".webp", ".avif", ".bmp", ".tif", ".tiff")
-IMPORT_EXT = IMG_EXT + MAC_IMPORT_EXT if MAC else IMG_EXT
+# PNG/GIF 가 아닌 그림은 가져올 때 PNG 로 바꿔서 저장해요 (Mac: sips, Windows: WIC)
+CONVERT_EXT = (".jpg", ".jpeg", ".heic", ".heif", ".webp", ".avif", ".bmp", ".tif", ".tiff")
+IMPORT_EXT = IMG_EXT + CONVERT_EXT
 IMAGE_FILETYPES = [("그림 파일", tuple("*" + ext for ext in IMPORT_EXT)), ("PNG", "*.png"), ("GIF", "*.gif")]
 UI_DIR = os.path.join(ASSET_DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
 # update.json 에 적힌 기본판 zip 을 받아, 크기·SHA-256·버전을 확인한 뒤 app\ 파일만 바꿔요.
 # (version.txt 와 CharacterWidget_v1.0.zip 은 1.1~1.4 설치본이 읽어서 계속 둬요.)
@@ -529,6 +530,256 @@ def accessory_path(item):
 
 
 def convert_image_to_png(source, directory):
+    """JPG·HEIC·WebP 같은 그림을 Tk 가 읽을 수 있는 PNG 로 바꿔요 (사진 방향도 바로잡아요)."""
+    if MAC:
+        return _convert_image_mac(source, directory)
+    return _convert_image_windows(source, directory)
+
+
+WIN_MAX_SIDE = 1024                 # 캐릭터는 170px 정도로 쓰니, 큰 사진은 이 크기로 줄여서 저장해요
+WIN_MAX_PIXELS = 260 * 1000 * 1000  # 2억 화소 폰 사진까지는 받아요 (읽을 때 바로 줄여서 메모리를 적게 써요)
+HEIF_EXT = (".heic", ".heif", ".avif")
+
+
+class ImageTooBig(ValueError):
+    """가져오려는 그림이 너무 커요."""
+
+
+class _WinGUID(ctypes.Structure):
+    _fields_ = [("b", ctypes.c_ubyte * 16)]
+
+
+class _PropVariant(ctypes.Structure):
+    _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                ("r3", ctypes.c_ushort), ("v1", ctypes.c_ulonglong), ("v2", ctypes.c_ulonglong)]
+
+
+PROPVARIANT_INT_TYPES = (2, 3, 16, 17, 18, 19)   # VT_I2, VT_I4, VT_I1, VT_UI1, VT_UI2, VT_UI4
+
+
+def heif_stored_size(path):
+    """HEIC·HEIF·AVIF 파일 안에 적힌 원래 그림 크기(돌리기 전)를 읽어요. 못 읽으면 None.
+    한 파일에 타일·미리보기 크기도 같이 들어 있어서, 그중 가장 큰 것을 본 그림으로 봐요."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            data = f.read(4 * 1024 * 1024)
+    except OSError:
+        return None
+    best, i = None, data.find(b"ispe")
+    while i >= 4:
+        if struct.unpack(">I", data[i - 4:i])[0] == 20 and i + 16 <= len(data):
+            w, h = struct.unpack(">II", data[i + 8:i + 16])
+            if w > 0 and h > 0 and (best is None or w * h > best[0] * best[1]):
+                best = (w, h)
+        i = data.find(b"ispe", i + 4)
+    return best
+
+
+def decoder_already_rotated(stored, w, h):
+    """원래 크기와 Windows 가 읽어 준 크기의 가로·세로가 뒤바뀌어 있으면,
+    Windows 가 이미 사진을 돌려준 거예요 (그럴 땐 한 번 더 돌리면 옆으로 누워요)."""
+    if not stored:
+        return False
+    sw, sh = stored
+    return sw != sh and w != h and (sw > sh) != (w > h)
+
+
+def orient_rgba(rgba, w, h, orientation):
+    """EXIF 방향(1~8)에 맞게 RGBA 그림을 돌리거나 뒤집어요. (그림, 새 너비, 새 높이)를 돌려줘요."""
+    import array
+    if orientation not in (2, 3, 4, 5, 6, 7, 8):
+        return rgba, w, h
+    a = array.array("I")
+    if a.itemsize != 4:
+        return rgba, w, h
+    a.frombytes(bytes(rgba))                      # 한 칸 = 한 화소(4바이트)
+    rows = [a[y * w:(y + 1) * w] for y in range(h)]
+    if orientation == 2:                          # 좌우 뒤집기
+        out, nw, nh = [r[::-1] for r in rows], w, h
+    elif orientation == 3:                        # 180도
+        out, nw, nh = [a[::-1]], w, h
+    elif orientation == 4:                        # 상하 뒤집기
+        out, nw, nh = rows[::-1], w, h
+    elif orientation == 5:                        # 대각선 뒤집기 (transpose)
+        out, nw, nh = [a[x::w] for x in range(w)], h, w
+    elif orientation == 6:                        # 시계 방향 90도
+        out, nw, nh = [a[x::w][::-1] for x in range(w)], h, w
+    elif orientation == 7:                        # 반대 대각선 뒤집기 (transverse)
+        out, nw, nh = [a[w - 1 - x::w][::-1] for x in range(w)], h, w
+    else:                                         # 8: 반시계 방향 90도
+        out, nw, nh = [a[w - 1 - x::w] for x in range(w)], h, w
+    res = array.array("I")
+    for part in out:
+        res.extend(part)
+    return bytearray(res.tobytes()), nw, nh
+
+
+
+def jpeg_orientation(path):
+    """JPG 파일의 EXIF 방향 값(1~8)을 직접 읽어요. 못 읽으면 0."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            data = f.read(256 * 1024)
+        if data[:2] != b"\xff\xd8":
+            return 0
+        i = 2
+        while i + 4 <= len(data) and data[i] == 0xFF:
+            marker = data[i + 1]
+            if marker in (0xD9, 0xDA):                       # 이미지 끝 / 그림 데이터 시작
+                break
+            size = struct.unpack(">H", data[i + 2:i + 4])[0]
+            seg = data[i + 4:i + 2 + size]
+            if marker == 0xE1 and seg[:6] == b"Exif\x00\x00":
+                t = seg[6:]
+                end = "<" if t[:2] == b"II" else ">" if t[:2] == b"MM" else None
+                if not end:
+                    return 0
+                ifd = struct.unpack(end + "I", t[4:8])[0]
+                count = struct.unpack(end + "H", t[ifd:ifd + 2])[0]
+                for k in range(count):
+                    e = ifd + 2 + k * 12
+                    tag, typ = struct.unpack(end + "HH", t[e:e + 4])
+                    if tag == 0x0112 and typ == 3:
+                        v = struct.unpack(end + "H", t[e + 8:e + 10])[0]
+                        return v if 1 <= v <= 8 else 0
+                return 0
+            i += 2 + size
+    except Exception:
+        return 0
+    return 0
+
+
+def write_png_rgba(path, width, height, rgba):
+    """RGBA 바이트를 PNG 파일로 저장 (표준 라이브러리만 사용)."""
+    import struct
+    import zlib
+    stride = width * 4
+    raw = bytearray()
+    for y in range(height):
+        raw += b"\x00"
+        raw += rgba[y * stride:(y + 1) * stride]
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
+
+
+def _convert_image_windows(source, directory):
+    """Windows 에 들어 있는 그림 해석 기능(WIC)으로 그림을 읽어 PNG 로 저장해요.
+    JPG·BMP·TIFF 는 기본으로 되고, HEIC·WebP·AVIF 는 그 PC 에 해당 확장이 설치돼 있어야 해요."""
+    import uuid
+    ole32 = ctypes.windll.ole32
+    GUID, PROPVARIANT = _WinGUID, _PropVariant
+
+    def guid(text):
+        g = GUID()
+        ctypes.memmove(ctypes.byref(g), uuid.UUID(text).bytes_le, 16)
+        return g
+
+    def call(obj, index, argtypes, *args):          # COM 메서드 호출 (실패하면 OSError)
+        vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        return ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, *argtypes)(vtbl[index])(obj, *args)
+
+    P = ctypes.POINTER(ctypes.c_void_p)
+    UINT = ctypes.c_uint32
+    held = []
+
+    def new():
+        p = ctypes.c_void_p()
+        held.append(p)
+        return p
+
+    # 다른 코드와 같이 쓰는 ole32.CoCreateInstance 설정을 건드리지 않도록, 이 함수만의 호출 틀을 따로 만들어요
+    co_create = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32,
+                                   ctypes.POINTER(GUID), P)(("CoCreateInstance", ole32))
+    init = ole32.CoInitializeEx(None, 2)            # 이미 켜져 있으면 S_FALSE, 다른 방식이면 그대로 사용
+    try:
+        factory = new()
+        co_create(ctypes.byref(guid("cacaf262-9370-4615-a13b-9f5539da4c0a")), None, 1,
+                  ctypes.byref(guid("ec5ec8a9-c395-4314-9c77-54d7a935ff70")), ctypes.byref(factory))
+        decoder = new()                             # IWICImagingFactory::CreateDecoderFromFilename
+        call(factory, 3, (ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, P),
+             os.path.abspath(source), None, 0x80000000, 0, ctypes.byref(decoder))
+        frame = new()                               # IWICBitmapDecoder::GetFrame(0)
+        call(decoder, 13, (UINT, P), 0, ctypes.byref(frame))
+
+        orientation = jpeg_orientation(source)     # 사진 방향 (EXIF Orientation): JPG 는 직접 읽고,
+        if not orientation:                         # 그 밖의 형식은 Windows 정보 읽기 기능으로
+            try:
+                reader = new()                      # IWICBitmapFrameDecode::GetMetadataQueryReader
+                call(frame, 8, (P,), ctypes.byref(reader))
+                for query in ("System.Photo.Orientation", "/app1/ifd/{ushort=274}", "/ifd/{ushort=274}"):
+                    pv = PROPVARIANT()
+                    try:
+                        call(reader, 5, (ctypes.c_wchar_p, ctypes.POINTER(PROPVARIANT)), query, ctypes.byref(pv))
+                    except OSError:
+                        continue
+                    value = (pv.v1 & (0xff if pv.vt in (16, 17) else 0xffff)
+                             if pv.vt in PROPVARIANT_INT_TYPES else None)
+                    ole32.PropVariantClear(ctypes.byref(pv))
+                    if value and 1 <= value <= 8:
+                        orientation = int(value)
+                        break
+            except OSError:
+                pass
+
+        src = frame
+
+        w, h = UINT(), UINT()                       # IWICBitmapSource::GetSize
+        call(src, 3, (ctypes.POINTER(UINT), ctypes.POINTER(UINT)), ctypes.byref(w), ctypes.byref(h))
+        w, h = w.value, h.value
+        if not (w > 0 and h > 0):
+            raise ValueError("그림 크기가 이상해요 (%dx%d)" % (w, h))
+        if w * h > WIN_MAX_PIXELS:
+            raise ImageTooBig("그림이 너무 커요 (%dx%d)" % (w, h))
+        # HEIC·AVIF 는 파일 안에 '돌리기' 정보가 따로 있어서, Windows 가 읽으면서 이미 돌려줄 수도 있어요.
+        # 원래 크기와 비교해 이미 돌아가 있으면 사진 방향 값을 한 번 더 적용하지 않아요 (두 번 돌리기 방지).
+        if (orientation in (5, 6, 7, 8) and os.path.splitext(source)[1].lower() in HEIF_EXT
+                and decoder_already_rotated(heif_stored_size(source), w, h)):
+            log("import image: Windows already rotated %s" % os.path.basename(source))
+            orientation = 1
+        if max(w, h) > WIN_MAX_SIDE:
+            f = WIN_MAX_SIDE / float(max(w, h))
+            w, h = max(1, int(w * f + 0.5)), max(1, int(h * f + 0.5))
+            scaler = new()                          # CreateBitmapScaler → Initialize (Fant)
+            call(factory, 11, (P,), ctypes.byref(scaler))
+            call(scaler, 8, (ctypes.c_void_p, UINT, UINT, ctypes.c_int), src, w, h, 3)
+            src = scaler
+
+        conv = new()                                # CreateFormatConverter → 32bppBGRA
+        call(factory, 10, (P,), ctypes.byref(conv))
+        call(conv, 8, (ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.c_int, ctypes.c_void_p, ctypes.c_double,
+                       ctypes.c_int),
+             src, ctypes.byref(guid("6fddc324-4e03-4bfe-b185-3d77768dc90f")), 0, None, 0.0, 0)
+        size = w * h * 4
+        buf = (ctypes.c_ubyte * size)()             # IWICBitmapSource::CopyPixels
+        call(conv, 7, (ctypes.c_void_p, UINT, UINT, ctypes.POINTER(ctypes.c_ubyte)), None, w * 4, size, buf)
+
+        bgra = bytes(buf)
+        rgba = bytearray(size)
+        rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4] = bgra[2::4], bgra[1::4], bgra[0::4], bgra[3::4]
+        rgba, w, h = orient_rgba(rgba, w, h, orientation)
+        out = os.path.join(directory, "image.png")
+        write_png_rgba(out, w, h, rgba)
+        return out
+    finally:
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+        for p in reversed(held):
+            if p.value:
+                try:
+                    release(ctypes.cast(p, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0][2])(p)
+                except Exception:
+                    pass
+        if init in (0, 1):
+            ole32.CoUninitialize()
+
+
+def _convert_image_mac(source, directory):
     # Use the macOS decoder and apply EXIF orientation before handing the PNG to Tk.
     script = """
 const image = sips.images[0];
@@ -562,9 +813,27 @@ new Output(context, "image.png", "public.png").addToQueue();
     return os.path.join(directory, "image.png")
 
 
-def import_images(paths, folder, fallback_name):
+def import_images(paths, folder, fallback_name, parent=None):
     """Store images as PNG or GIF after Tk can load them."""
     os.makedirs(folder, exist_ok=True)
+    busy = parent is not None and any(os.path.splitext(p)[1].lower() in CONVERT_EXT for p in paths)
+    if busy:                                        # 큰 사진은 바꾸는 데 시간이 걸려서, 기다리는 표시를 보여줘요
+        try:
+            parent.config(cursor="watch")
+            parent.update_idletasks()
+        except Exception:
+            busy = False
+    try:
+        return _import_images(paths, folder, fallback_name, parent if busy else None)
+    finally:
+        if busy:
+            try:
+                parent.config(cursor="")
+            except Exception:
+                pass
+
+
+def _import_images(paths, folder, fallback_name, parent):
     added, bad = None, []
     for source in paths:
         base = os.path.basename(source)
@@ -591,9 +860,17 @@ def import_images(paths, folder, fallback_name):
                 tk.PhotoImage(file=image)
                 os.replace(image, os.path.join(folder, name))
             added = name
+        except ImageTooBig as ex:
+            log("import image %s: %s" % (base, ex))
+            bad.append(base + "  ← 사진이 너무 커요. 크기를 줄여서 다시 넣어 주세요")
         except Exception as ex:
             log("import image %s: %s" % (base, ex))
             bad.append(base)
+        if parent is not None:
+            try:
+                parent.update_idletasks()           # 여러 장일 때 창이 멈춘 것처럼 보이지 않게
+            except Exception:
+                pass
     return added, bad
 
 
@@ -602,8 +879,11 @@ def show_import_failures(parent, title, bad):
         help_text = ("PNG, GIF, JPG, HEIC, HEIF, WebP, AVIF, BMP, TIFF를 가져올 수 있어요.\n"
                      "지원 형식인데 열리지 않으면 미리보기 앱에서 먼저 열어 보세요.")
     else:
-        help_text = ("PNG 또는 GIF 그림만 쓸 수 있어요.\n"
-                     "JPG는 그림판에서 열고 '다른 이름으로 저장 → PNG'로 바꿔 주세요.")
+        help_text = ("PNG, GIF, JPG, BMP, TIFF를 가져올 수 있어요.\n"
+                     "HEIC(아이폰 사진)는 Microsoft Store의 'HEIF 이미지 확장'과\n"
+                     "'HEVC 비디오 확장'(유료)이 모두 있어야 열려요.\n"
+                     "WebP는 'WebP 이미지 확장', AVIF는 'AV1 비디오 확장'이 있어야 해요.\n"
+                     "그래도 안 되면 그림판에서 열고 '다른 이름으로 저장 → PNG'로 바꿔 주세요.")
     messagebox.showwarning(title, "이 그림은 추가하지 못했어요.\n" + "\n".join(bad) + "\n\n" + help_text, parent=parent)
 
 
@@ -1352,7 +1632,7 @@ class Picker:
             filetypes=IMAGE_FILETYPES)
         if not paths:
             return
-        added, bad = import_images(paths, CHAR_DIR, "character")
+        added, bad = import_images(paths, CHAR_DIR, "character", self.top)
         if bad:
             show_import_failures(self.top, "캐릭터 변경", bad)
         if added:
@@ -1769,7 +2049,7 @@ class DecorWindow:
             filetypes=IMAGE_FILETYPES)
         if not paths:
             return
-        added, bad = import_images(paths, ACC_DIR, "accessory")
+        added, bad = import_images(paths, ACC_DIR, "accessory", self.top)
         if bad:
             show_import_failures(self.top, "꾸미기", bad)
         if added:

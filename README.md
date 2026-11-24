@@ -15,7 +15,9 @@ Windows와 macOS 바탕화면에 내가 고른 그림이 캐릭터로 떠 있는
 
 새 버전은 앱을 종료한 후 응용 프로그램 폴더의 `.app`을 교체해 설치해요. 메모, 그림, 설정은 `~/Library/Application Support/CharacterWidget`에 저장돼요. 앱을 제거하려면 로그인 항목에서 빼고 `.app`을 휴지통으로 옮기세요.
 
-Mac에서는 캐릭터와 소품에 PNG, GIF, JPG/JPEG, HEIC/HEIF, WebP, AVIF, BMP, TIFF를 가져올 수 있어요. 움직이는 WebP나 AVIF는 첫 프레임을 표시해요.
+캐릭터와 소품에 PNG, GIF, JPG/JPEG, HEIC/HEIF, WebP, AVIF, BMP, TIFF를 가져올 수 있어요 (Windows는 1.6부터). PNG·GIF가 아닌 그림은 PNG로 바꿔서 저장하고, 사진 방향도 바로잡아요. 움직이는 WebP나 AVIF는 첫 프레임을 표시해요.
+Windows에서 HEIC(아이폰 사진)는 Microsoft Store의 'HEIF 이미지 확장'과 'HEVC 비디오 확장'(유료)이 모두 있어야 열려요. WebP는 'WebP 이미지 확장', AVIF는 'AV1 비디오 확장'이 있어야 해요.
+Windows는 색 프로파일 변환 없이 가져와서, 아이폰 HEIC(Display P3)나 CMYK JPG는 Mac보다 색이 조금 다르게 보일 수 있어요.
 
 ## Windows용 내려받기
 
