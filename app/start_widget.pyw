@@ -4,17 +4,29 @@
 - 캐릭터 클릭: 메모 열기
 - 우클릭 → 캐릭터 변경: 캐릭터 고르기 / + 로 그림 추가
 """
+import os
+import sys
+
+# Windows: record the start before importing tkinter, so a blocked Tk still leaves a trace in launch.log.
+if sys.platform == "win32":
+    try:
+        from datetime import datetime as _dt
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.log"), "a",
+                  encoding="utf-8") as _f:
+            _f.write("%s start  python=%s  exe=%s\n" % (_dt.now().isoformat(timespec="seconds"),
+                                                       sys.version.split()[0], sys.executable))
+    except Exception:
+        pass
+
 import copy
 import ctypes
 import json
-import os
 import random
 import math
 import queue
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -197,7 +209,7 @@ UI_DIR = os.path.join(ASSET_DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
 UPDATE_ZIP = "CharacterWidget_v1.0.zip"          # 기본판 zip 안의 app\ 파일만 바꿔요
 UPDATE_KEEP = {"settings.ini", "decor.json", "names.json", "state.json", "memo.txt", "pos.txt",
@@ -3048,12 +3060,12 @@ def main():
         import ssl
         if ssl.get_default_verify_paths().cafile is None:
             os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/cert.pem")
-    try:
-        with open(os.path.join(DIR, "launch.log"), "a", encoding="utf-8") as f:
-            f.write("%s start  python=%s  exe=%s\n" % (datetime.now().isoformat(timespec="seconds"),
-                                                       sys.version.split()[0], sys.executable))
-    except OSError:
-        pass
+        try:                                            # Windows already wrote this line at the very top
+            with open(os.path.join(DIR, "launch.log"), "a", encoding="utf-8") as f:
+                f.write("%s start  python=%s  exe=%s\n" % (datetime.now().isoformat(timespec="seconds"),
+                                                           sys.version.split()[0], sys.executable))
+        except OSError:
+            pass
     lock = single_instance()
     if lock is None:
         try:
