@@ -74,11 +74,15 @@ Mac에서는 캐릭터와 소품에 PNG, GIF, JPG/JPEG, HEIC/HEIF, WebP, AVIF, B
 
 ## Windows 새 버전 올리는 법 (관리자용)
 
-1. `app/start_widget.pyw`의 `APP_VERSION`과 `version.txt`의 숫자를 같은 값으로 올려요 (예: 1.1 → 1.2)
-2. `python3 tools/build_zips.py`로 zip 두 개를 다시 만들어요
-3. 바뀐 파일을 모두 한 번에 올려요
+1. `app/start_widget.pyw`의 `APP_VERSION`만 올려요 (예: 1.5 → 1.6)
+2. `python3 tools/build_zips.py`를 실행해요
+   - zip 두 개, `update.json`(버전·zip 크기·SHA-256), `version.txt`를 한 번에 새로 만들어요
+   - `app/settings.ini`에 캘린더 주소(`ICAL_URL…`)나 `UPDATE_BASE` 값이 있으면 빌드가 멈춰요
+3. 브랜치에 올리고 PR → 리뷰 → main에 병합해요 (main에 바로 올리지 않기)
 
-`version.txt`가 바뀌면, 설치된 위젯이 6시간 안에 알아채고 사용자에게 업데이트할지 물어봐요.
+main의 `update.json`이 바뀌면, 설치된 위젯(1.5 이상)이 6시간 안에 알아채고 사용자에게 물어봐요.
+위젯은 받은 zip의 크기·SHA-256·버전이 `update.json`과 모두 같을 때만 설치하고, 설치 중 실패하면 원래 파일로 되돌려요.
+1.1~1.4 설치본은 `version.txt`와 `CharacterWidget_v1.0.zip`을 읽으니 두 파일도 계속 둬요.
 이 저장소에 올라간 내용은 사용자 PC에서 실행되니까, 올리기 전에 꼭 직접 테스트해 주세요.
 
 ## Mac용 앱 빌드하기

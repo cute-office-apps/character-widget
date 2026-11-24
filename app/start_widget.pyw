@@ -209,9 +209,10 @@ UI_DIR = os.path.join(ASSET_DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
-UPDATE_ZIP = "CharacterWidget_v1.0.zip"          # 기본판 zip 안의 app\ 파일만 바꿔요
+# update.json 에 적힌 기본판 zip 을 받아, 크기·SHA-256·버전을 확인한 뒤 app\ 파일만 바꿔요.
+# (version.txt 와 CharacterWidget_v1.0.zip 은 1.1~1.4 설치본이 읽어서 계속 둬요.)
 UPDATE_KEEP = {"settings.ini", "decor.json", "names.json", "state.json", "memo.txt", "pos.txt",
                "character_choice.txt", "error.log", "launch.log", "diag.txt"}
 
@@ -234,8 +235,40 @@ def fetch_bytes(url, limit=5 * 1024 * 1024):
     return data
 
 
-def apply_update_zip(data):
-    """기본판 zip 에서 app\\ 아래 파일만 위젯 폴더에 덮어써요. 내 설정·메모·캐릭터는 건드리지 않아요."""
+UPDATE_SKIP_DIRS = {"characters", ".anim", ".update_new", ".update_old"}
+UPDATE_ZIP_NAME = re.compile(r"^[A-Za-z0-9._-]+\.zip$")
+
+
+def parse_update_manifest(raw):
+    """update.json: {"version": "1.5", "zip": "...zip", "sha256": "...", "size": 123}"""
+    m = json.loads(raw.decode("utf-8"))
+    v, name = str(m["version"]).strip(), str(m["zip"]).strip()
+    digest, size = str(m["sha256"]).strip().lower(), int(m["size"])
+    if version_tuple(v) == (0,) or not UPDATE_ZIP_NAME.match(name):
+        raise ValueError("업데이트 정보가 이상해요")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest) or not 0 < size <= 5 * 1024 * 1024:
+        raise ValueError("업데이트 정보가 이상해요")
+    return {"version": v, "zip": name, "sha256": digest, "size": size}
+
+
+def verify_update_zip(data, manifest):
+    """받은 zip 이 update.json 과 같은 파일인지 (크기·SHA-256) 확인해요.
+    확인 정보와 zip 을 따로 받기 때문에, 그 사이에 배포가 바뀌면 여기서 걸러져요."""
+    import hashlib
+    if len(data) != manifest["size"] or hashlib.sha256(data).hexdigest() != manifest["sha256"]:
+        raise ValueError("받은 업데이트 파일이 확인 정보와 달라요.\n잠시 뒤에 다시 해볼게요")
+
+
+def _update_key(rel):
+    return os.path.normcase(rel.replace("/", os.sep)).lower()
+
+
+def apply_update_zip(data, expect_version=None):
+    """기본판 zip 에서 app\\ 아래 파일만 위젯 폴더에 덮어써요. 내 설정·메모·캐릭터는 건드리지 않아요.
+
+    모두 바꾸거나, 하나도 안 바꾸거나: 먼저 임시 폴더에 전부 풀고 검사한 다음,
+    원래 파일을 백업하며 하나씩 바꿔요. 중간에 실패하면 이미 바꾼 파일을 원래대로 되돌려요.
+    start_widget.pyw 는 맨 마지막에 바꿔서, 실패했을 때 '이미 새 버전'으로 보이지 않게 해요."""
     import io
     import zipfile
     z = zipfile.ZipFile(io.BytesIO(data))
@@ -246,26 +279,75 @@ def apply_update_zip(data):
             break
     if not prefix:
         raise ValueError("업데이트 파일 모양이 이상해요")
+
     root = os.path.abspath(DIR)
-    count = 0
+    root_key = os.path.normcase(root).rstrip("\\/") + os.sep
+    keep = {_update_key(k) for k in UPDATE_KEEP}
+    skip = {d.lower() for d in UPDATE_SKIP_DIRS}
+    files = []                                       # (relative parts, data)
     for info in z.infolist():
-        n = info.filename
+        n = info.filename.replace("\\", "/")
         if not n.startswith(prefix) or n.endswith("/"):
             continue
-        rel = n[len(prefix):]
-        parts = rel.split("/")
-        if parts[0] in ("characters", ".anim") or rel in UPDATE_KEEP or ".." in parts:
+        parts = [p for p in n[len(prefix):].split("/") if p not in ("", ".")]
+        if not parts or ".." in parts or ":" in parts[0]:
+            raise ValueError("업데이트 파일 경로가 이상해요")
+        if parts[0].lower() in skip or parts[0].lower().startswith(".update_") \
+                or _update_key("/".join(parts)) in keep:
             continue
-        dst = os.path.abspath(os.path.join(root, *parts))
-        if not dst.startswith(root + os.sep):
-            continue
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        tmp = dst + ".new"
-        with open(tmp, "wb") as f:
-            f.write(z.read(info))
-        os.replace(tmp, dst)
-        count += 1
-    return count
+        dst = os.path.normpath(os.path.join(root, *parts))
+        if not os.path.normcase(dst).startswith(root_key):
+            raise ValueError("업데이트 파일 경로가 이상해요")
+        files.append((parts, z.read(info)))
+
+    main_py = [d for p, d in files if p == ["start_widget.pyw"]]
+    if not main_py:
+        raise ValueError("업데이트 파일에 위젯 본체가 없어요")
+    if expect_version and ('APP_VERSION = "%s"' % expect_version).encode() not in main_py[0]:
+        raise ValueError("업데이트 파일의 버전이 달라요")
+    for p, d in files:                               # 깨진 파이썬 파일이면 시작도 안 해요
+        if p[-1].lower().endswith((".py", ".pyw")):
+            compile(d, "/".join(p), "exec")
+    files.sort(key=lambda f: f[0] == ["start_widget.pyw"])     # 본체는 맨 마지막
+
+    stage = os.path.join(root, ".update_new")
+    backup = os.path.join(root, ".update_old_%d" % int(time.time()))   # 남은 백업은 덮어쓰지 않아요
+    shutil.rmtree(stage, ignore_errors=True)
+    keep_backup = False
+    try:
+        for parts, d in files:                       # 1) 전부 임시 폴더에 먼저 풀기
+            path = os.path.join(stage, *parts)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(d)
+        done = []                                    # (dst, backup or None)
+        try:
+            for parts, d in files:                   # 2) 하나씩 바꾸기 (원래 파일은 백업)
+                dst = os.path.join(root, *parts)
+                old = None
+                if os.path.exists(dst):
+                    old = os.path.join(backup, *parts)
+                    os.makedirs(os.path.dirname(old), exist_ok=True)
+                    os.replace(dst, old)
+                done.append((dst, old))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.replace(os.path.join(stage, *parts), dst)
+        except Exception:
+            for dst, old in reversed(done):          # 3) 실패하면 되돌리기
+                try:
+                    if old:
+                        os.replace(old, dst)
+                    elif os.path.exists(dst):
+                        os.remove(dst)
+                except Exception as ex:
+                    keep_backup = True               # 되돌리기도 실패하면 백업 폴더는 지우지 않아요
+                    log("update rollback %s: %s (backup kept in %s)" % (dst, ex, backup))
+            raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        if not keep_backup:
+            shutil.rmtree(backup, ignore_errors=True)
+    return len(files)
 DEFAULT_CHAR = "토리.png"
 ACC_DIR = os.path.join(DIR, "accessories")
 BUNDLED_ACC_DIR = os.path.join(ASSET_DIR, "accessories")
@@ -2289,9 +2371,10 @@ class App:
         load_names()
         if self.placeholder:
             self.char_key, self.char = None, None
-        want = read_choice() if keys else ""
+        saved = read_choice() if keys else ""
+        want = saved
         if len(keys) > 1 and load_state().get("random_char"):      # 랜덤 바꾸기: 켤 때마다 다른 친구
-            want = random.choice([k for k in keys if k != want] or keys)
+            want = random.choice([k for k in keys if k != saved] or keys)
         if keys:
             self.char_key = want if want in keys else (DEFAULT_CHAR if DEFAULT_CHAR in keys else keys[0])
             try:
@@ -2300,6 +2383,8 @@ class App:
                 log("load %s: %s" % (self.char_key, ex))
                 self.char_key = keys[0]
                 self.char = load_char(self.char_key, self.int_cfg("SIZE", MAX_SIZE), self.animate_on(), self.bg_on(), self.dec_for(self.char_key))
+            if self.char_key != saved:
+                write_choice(self.char_key)          # 켤 때 고른 친구를 저장해서, 다음엔 또 다른 친구로
         self.name = self.display_name(self.char_key)
 
         self.effect = (self.dec_for(self.char_key) or {}).get("effect")
@@ -2904,30 +2989,32 @@ class App:
 
         def work():
             try:
-                v = fetch_bytes(base + "version.txt", 1024).decode("utf-8", "replace").strip()
-                self.uq.put(("check", True, (v, manual)))
+                m = parse_update_manifest(fetch_bytes(base + "update.json", 4096))
+                self.uq.put(("check", True, (m, manual)))
             except Exception as ex:
                 self.uq.put(("check", False, (str(ex), manual)))
         threading.Thread(target=work, daemon=True).start()
 
     def update_found(self, ok, val):
-        v, manual = val
+        m, manual = val
         if not ok:
-            log("update check: %s" % v)
+            log("update check: %s" % m)
             if manual:
                 self.say("업데이트를 확인하지 못했어요.\n인터넷 연결을 확인해 주세요.", 8, False)
             return
+        v = m["version"]
         if version_tuple(v) <= version_tuple(APP_VERSION):
             if manual:
                 self.say("지금 최신 버전이에요! (%s)" % APP_VERSION, 5, False)
             return
         if not manual and self.state.get("update_later") == "%s/%s" % (v, date.today()):
             return                                                  # 오늘 '나중에'를 눌렀으면 내일 다시
-        self.ask_update(v)
+        self.ask_update(m)
 
-    def ask_update(self, v):
+    def ask_update(self, m):
+        v = m["version"]
         if self.bubble_busy():
-            self.root.after(10000, lambda: self.ask_update(v))
+            self.root.after(10000, lambda: self.ask_update(m))
             return
 
         def later():
@@ -2936,9 +3023,10 @@ class App:
             save_state(self.state)
 
         self.say("새 버전(%s)이 나왔어요!\n업데이트할까요?\n(메모·캐릭터·설정은 그대로예요)" % v, 0,
-                 buttons=[("나중에", later, False), ("업데이트", lambda: self.start_update(v), True)])
+                 buttons=[("나중에", later, False), ("업데이트", lambda: self.start_update(m), True)])
 
-    def start_update(self, v):
+    def start_update(self, m):
+        v = m["version"]
         if self.bubble:
             self.bubble.close()
         self.update_busy = True
@@ -2947,7 +3035,9 @@ class App:
 
         def work():
             try:
-                n = apply_update_zip(fetch_bytes(base + UPDATE_ZIP))
+                data = fetch_bytes(base + m["zip"])
+                verify_update_zip(data, m)                  # 크기·SHA-256 이 update.json 과 같아야 해요
+                n = apply_update_zip(data, v)               # 안의 버전도 같아야 하고, 실패하면 되돌려요
                 self.uq.put(("apply", True, (v, n)))
             except Exception as ex:
                 self.uq.put(("apply", False, (v, str(ex))))
