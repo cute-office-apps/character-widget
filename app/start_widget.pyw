@@ -537,7 +537,52 @@ def convert_image_to_png(source, directory):
 
 
 WIN_MAX_SIDE = 1024                 # 캐릭터는 170px 정도로 쓰니, 큰 사진은 이 크기로 줄여서 저장해요
-WIN_MAX_PIXELS = 80 * 1000 * 1000   # 너무 큰 그림(약 8천만 화소 초과)은 받지 않아요
+WIN_MAX_PIXELS = 260 * 1000 * 1000  # 2억 화소 폰 사진까지는 받아요 (읽을 때 바로 줄여서 메모리를 적게 써요)
+HEIF_EXT = (".heic", ".heif", ".avif")
+
+
+class ImageTooBig(ValueError):
+    """가져오려는 그림이 너무 커요."""
+
+
+class _WinGUID(ctypes.Structure):
+    _fields_ = [("b", ctypes.c_ubyte * 16)]
+
+
+class _PropVariant(ctypes.Structure):
+    _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                ("r3", ctypes.c_ushort), ("v1", ctypes.c_ulonglong), ("v2", ctypes.c_ulonglong)]
+
+
+PROPVARIANT_INT_TYPES = (2, 3, 16, 17, 18, 19)   # VT_I2, VT_I4, VT_I1, VT_UI1, VT_UI2, VT_UI4
+
+
+def heif_stored_size(path):
+    """HEIC·HEIF·AVIF 파일 안에 적힌 원래 그림 크기(돌리기 전)를 읽어요. 못 읽으면 None.
+    한 파일에 타일·미리보기 크기도 같이 들어 있어서, 그중 가장 큰 것을 본 그림으로 봐요."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            data = f.read(4 * 1024 * 1024)
+    except OSError:
+        return None
+    best, i = None, data.find(b"ispe")
+    while i >= 4:
+        if struct.unpack(">I", data[i - 4:i])[0] == 20 and i + 16 <= len(data):
+            w, h = struct.unpack(">II", data[i + 8:i + 16])
+            if w > 0 and h > 0 and (best is None or w * h > best[0] * best[1]):
+                best = (w, h)
+        i = data.find(b"ispe", i + 4)
+    return best
+
+
+def decoder_already_rotated(stored, w, h):
+    """원래 크기와 Windows 가 읽어 준 크기의 가로·세로가 뒤바뀌어 있으면,
+    Windows 가 이미 사진을 돌려준 거예요 (그럴 땐 한 번 더 돌리면 옆으로 누워요)."""
+    if not stored:
+        return False
+    sw, sh = stored
+    return sw != sh and w != h and (sw > sh) != (w > h)
 
 
 def orient_rgba(rgba, w, h, orientation):
@@ -629,13 +674,7 @@ def _convert_image_windows(source, directory):
     JPG·BMP·TIFF 는 기본으로 되고, HEIC·WebP·AVIF 는 그 PC 에 해당 확장이 설치돼 있어야 해요."""
     import uuid
     ole32 = ctypes.windll.ole32
-
-    class GUID(ctypes.Structure):
-        _fields_ = [("b", ctypes.c_ubyte * 16)]
-
-    class PROPVARIANT(ctypes.Structure):
-        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
-                    ("r3", ctypes.c_ushort), ("v1", ctypes.c_ulonglong), ("v2", ctypes.c_ulonglong)]
+    GUID, PROPVARIANT = _WinGUID, _PropVariant
 
     def guid(text):
         g = GUID()
@@ -655,14 +694,14 @@ def _convert_image_windows(source, directory):
         held.append(p)
         return p
 
+    # 다른 코드와 같이 쓰는 ole32.CoCreateInstance 설정을 건드리지 않도록, 이 함수만의 호출 틀을 따로 만들어요
+    co_create = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32,
+                                   ctypes.POINTER(GUID), P)(("CoCreateInstance", ole32))
     init = ole32.CoInitializeEx(None, 2)            # 이미 켜져 있으면 S_FALSE, 다른 방식이면 그대로 사용
     try:
-        ole32.CoCreateInstance.argtypes = [ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32,
-                                           ctypes.POINTER(GUID), P]
-        ole32.CoCreateInstance.restype = ctypes.HRESULT
         factory = new()
-        ole32.CoCreateInstance(ctypes.byref(guid("cacaf262-9370-4615-a13b-9f5539da4c0a")), None, 1,
-                               ctypes.byref(guid("ec5ec8a9-c395-4314-9c77-54d7a935ff70")), ctypes.byref(factory))
+        co_create(ctypes.byref(guid("cacaf262-9370-4615-a13b-9f5539da4c0a")), None, 1,
+                  ctypes.byref(guid("ec5ec8a9-c395-4314-9c77-54d7a935ff70")), ctypes.byref(factory))
         decoder = new()                             # IWICImagingFactory::CreateDecoderFromFilename
         call(factory, 3, (ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, P),
              os.path.abspath(source), None, 0x80000000, 0, ctypes.byref(decoder))
@@ -680,9 +719,10 @@ def _convert_image_windows(source, directory):
                         call(reader, 5, (ctypes.c_wchar_p, ctypes.POINTER(PROPVARIANT)), query, ctypes.byref(pv))
                     except OSError:
                         continue
-                    value = pv.v1 & 0xffff if pv.vt in (2, 3, 18, 19) else None   # I2, I4, UI2, UI4
+                    value = (pv.v1 & (0xff if pv.vt in (16, 17) else 0xffff)
+                             if pv.vt in PROPVARIANT_INT_TYPES else None)
                     ole32.PropVariantClear(ctypes.byref(pv))
-                    if value:
+                    if value and 1 <= value <= 8:
                         orientation = int(value)
                         break
             except OSError:
@@ -693,8 +733,16 @@ def _convert_image_windows(source, directory):
         w, h = UINT(), UINT()                       # IWICBitmapSource::GetSize
         call(src, 3, (ctypes.POINTER(UINT), ctypes.POINTER(UINT)), ctypes.byref(w), ctypes.byref(h))
         w, h = w.value, h.value
-        if not (w > 0 and h > 0) or w * h > WIN_MAX_PIXELS:
+        if not (w > 0 and h > 0):
             raise ValueError("그림 크기가 이상해요 (%dx%d)" % (w, h))
+        if w * h > WIN_MAX_PIXELS:
+            raise ImageTooBig("그림이 너무 커요 (%dx%d)" % (w, h))
+        # HEIC·AVIF 는 파일 안에 '돌리기' 정보가 따로 있어서, Windows 가 읽으면서 이미 돌려줄 수도 있어요.
+        # 원래 크기와 비교해 이미 돌아가 있으면 사진 방향 값을 한 번 더 적용하지 않아요 (두 번 돌리기 방지).
+        if (orientation in (5, 6, 7, 8) and os.path.splitext(source)[1].lower() in HEIF_EXT
+                and decoder_already_rotated(heif_stored_size(source), w, h)):
+            log("import image: Windows already rotated %s" % os.path.basename(source))
+            orientation = 1
         if max(w, h) > WIN_MAX_SIDE:
             f = WIN_MAX_SIDE / float(max(w, h))
             w, h = max(1, int(w * f + 0.5)), max(1, int(h * f + 0.5))
@@ -765,9 +813,27 @@ new Output(context, "image.png", "public.png").addToQueue();
     return os.path.join(directory, "image.png")
 
 
-def import_images(paths, folder, fallback_name):
+def import_images(paths, folder, fallback_name, parent=None):
     """Store images as PNG or GIF after Tk can load them."""
     os.makedirs(folder, exist_ok=True)
+    busy = parent is not None and any(os.path.splitext(p)[1].lower() in CONVERT_EXT for p in paths)
+    if busy:                                        # 큰 사진은 바꾸는 데 시간이 걸려서, 기다리는 표시를 보여줘요
+        try:
+            parent.config(cursor="watch")
+            parent.update_idletasks()
+        except Exception:
+            busy = False
+    try:
+        return _import_images(paths, folder, fallback_name, parent if busy else None)
+    finally:
+        if busy:
+            try:
+                parent.config(cursor="")
+            except Exception:
+                pass
+
+
+def _import_images(paths, folder, fallback_name, parent):
     added, bad = None, []
     for source in paths:
         base = os.path.basename(source)
@@ -794,9 +860,17 @@ def import_images(paths, folder, fallback_name):
                 tk.PhotoImage(file=image)
                 os.replace(image, os.path.join(folder, name))
             added = name
+        except ImageTooBig as ex:
+            log("import image %s: %s" % (base, ex))
+            bad.append(base + "  ← 사진이 너무 커요. 크기를 줄여서 다시 넣어 주세요")
         except Exception as ex:
             log("import image %s: %s" % (base, ex))
             bad.append(base)
+        if parent is not None:
+            try:
+                parent.update_idletasks()           # 여러 장일 때 창이 멈춘 것처럼 보이지 않게
+            except Exception:
+                pass
     return added, bad
 
 
@@ -806,8 +880,9 @@ def show_import_failures(parent, title, bad):
                      "지원 형식인데 열리지 않으면 미리보기 앱에서 먼저 열어 보세요.")
     else:
         help_text = ("PNG, GIF, JPG, BMP, TIFF를 가져올 수 있어요.\n"
-                     "HEIC·HEIF·WebP·AVIF는 Microsoft Store의 'HEIF 이미지 확장',\n"
-                     "'WebP 이미지 확장', 'AV1 비디오 확장'이 있어야 열려요.\n"
+                     "HEIC(아이폰 사진)는 Microsoft Store의 'HEIF 이미지 확장'과\n"
+                     "'HEVC 비디오 확장'(유료)이 모두 있어야 열려요.\n"
+                     "WebP는 'WebP 이미지 확장', AVIF는 'AV1 비디오 확장'이 있어야 해요.\n"
                      "그래도 안 되면 그림판에서 열고 '다른 이름으로 저장 → PNG'로 바꿔 주세요.")
     messagebox.showwarning(title, "이 그림은 추가하지 못했어요.\n" + "\n".join(bad) + "\n\n" + help_text, parent=parent)
 
@@ -1557,7 +1632,7 @@ class Picker:
             filetypes=IMAGE_FILETYPES)
         if not paths:
             return
-        added, bad = import_images(paths, CHAR_DIR, "character")
+        added, bad = import_images(paths, CHAR_DIR, "character", self.top)
         if bad:
             show_import_failures(self.top, "캐릭터 변경", bad)
         if added:
@@ -1974,7 +2049,7 @@ class DecorWindow:
             filetypes=IMAGE_FILETYPES)
         if not paths:
             return
-        added, bad = import_images(paths, ACC_DIR, "accessory")
+        added, bad = import_images(paths, ACC_DIR, "accessory", self.top)
         if bad:
             show_import_failures(self.top, "꾸미기", bad)
         if added:
