@@ -210,7 +210,7 @@ UI_DIR = os.path.join(ASSET_DIR, "ui")
 STATE_FILE = os.path.join(DIR, "state.json")
 
 # ---------- 자동 업데이트
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 UPDATE_BASE = "https://raw.githubusercontent.com/cute-office-apps/character-widget/main/"
 # update.json 에 적힌 기본판 zip 을 받아, 크기·SHA-256·버전을 확인한 뒤 app\ 파일만 바꿔요.
 # (version.txt 와 CharacterWidget_v1.0.zip 은 1.1~1.4 설치본이 읽어서 계속 둬요.)
@@ -2138,13 +2138,15 @@ class CuteMenu:
         configure_overlay(top)
         items = [("memo", "메모 열기", app.open_memo),
                  ("calendar", "오늘 일정", app.menu_today),
+                 ("timer", "집중 타이머 멈추기" if app.focus else
+                  "집중 타이머 시작 (%d분)" % max(1, app.int_cfg("FOCUS_MINUTES", 25)), app.toggle_focus),
                  ("decor", "꾸미기", app.open_decor),
                  ("change", "캐릭터 바꾸기", app.open_picker),
                  ("settings", "설정", app.open_settings_window),
                  ("help", "사용법 보기", app.start_tour)]
         head_h, row_h, tog_h, foot_h = 52, 36, 40, 52
         W = self.W
-        H = head_h + 6 + len(items) * row_h + 8 + tog_h * 2 + foot_h
+        H = head_h + 6 + len(items) * row_h + 8 + tog_h * 3 + foot_h
         c = self.c = tk.Canvas(top, width=W, height=H, bg=WINDOW_BG, highlightthickness=0, bd=0)
         c.pack()
         round_rect(c, 2, 2, W - 3, H - 3, 18, fill=self.BG, outline=LINE, width=2)
@@ -2165,6 +2167,8 @@ class CuteMenu:
         self.switches = {}
         self.toggle_row("tog_rand", y, tog_h, "캐릭터 랜덤으로 바꾸기", app.random_on, self.toggle_random)
         self.shuffle_button(self.W - 62 - 20, y + tog_h // 2 - 1)
+        y += tog_h
+        self.toggle_row("tog_clock", y, tog_h, "시계 보이기", app.clock_on, self.toggle_clock)
         y += tog_h
         if MAC:
             self.row(len(items), y, tog_h, "settings", "로그인 시 자동 실행 설정", open_login_items)
@@ -2255,6 +2259,11 @@ class CuteMenu:
         self.app.set_autostart_on(not autostart_enabled())
         self.draw_switch("tog")
 
+    def toggle_clock(self):
+        self.app.set_clock_on(not self.app.clock_on())
+        if self.alive:
+            self.draw_switch("tog_clock")
+
     def toggle_random(self):
         self.app.set_random_on(not self.app.random_on())
         if self.alive:
@@ -2330,6 +2339,10 @@ class SettingsWindow:
         self.remind_opts = [("끄기", 0), ("5분 전", 5), ("10분 전", 10), ("15분 전", 15), ("30분 전", 30)]
         self.remind = tk.StringVar(value=next((l for l, v in self.remind_opts if v == rm), "10분 전"))
         self.tq = queue.Queue()
+        self.clock = tk.BooleanVar(value=app.clock_on())
+        self.clock_style = tk.StringVar(value="analog" if cfg.get("CLOCK_STYLE", "").lower() == "analog" else "digital")
+        self.work_end = tk.StringVar(value=cfg.get("WORK_END", ""))
+        self.chime = tk.BooleanVar(value=cfg.get("HOURLY_CHIME", "off").lower() == "on")
 
         def section(text):
             tk.Label(top, text=text, bg=self.BG, fg="#5a4636", font=f_title).pack(anchor="w", padx=18, pady=(12, 2))
@@ -2378,6 +2391,22 @@ class SettingsWindow:
         self.test_lbl = tk.Label(top, text="", bg=self.BG, fg="#5a4636", font=(FONT_FAMILY, 8),
                                  justify="left", wraplength=330)
         self.test_lbl.pack(anchor="w", padx=24, pady=(2, 0))
+        section("시계")
+        crow = tk.Frame(top, bg=self.BG)
+        crow.pack(anchor="w", padx=24)
+        tk.Checkbutton(crow, text="시계 보이기", variable=self.clock, bg=self.BG, activebackground=self.BG,
+                       font=f).pack(side="left")
+        for val, text in (("digital", "디지털"), ("analog", "아날로그")):
+            tk.Radiobutton(crow, text=text, value=val, variable=self.clock_style, bg=self.BG,
+                           activebackground=self.BG, font=f).pack(side="left", padx=(6, 0))
+        wrow = tk.Frame(top, bg=self.BG)
+        wrow.pack(anchor="w", padx=24, pady=(2, 0))
+        tk.Label(wrow, text="퇴근 시간", bg=self.BG, font=f).pack(side="left", padx=(4, 6))
+        tk.Entry(wrow, textvariable=self.work_end, width=7, font=f, relief="groove").pack(side="left")
+        tk.Label(wrow, text="예) 18:00, 평일만", bg=self.BG, fg="#8a7360",
+                 font=(FONT_FAMILY, 8)).pack(side="left", padx=(4, 8))
+        tk.Checkbutton(wrow, text="정각 알림", variable=self.chime, bg=self.BG, activebackground=self.BG,
+                       font=f).pack(side="left")
         section("기타")
         check("켤 때 인사하기", self.greet)
         if not MAC:
@@ -2406,9 +2435,10 @@ class SettingsWindow:
         wa = work_area()
         if wa and x < wa[0]:
             x = r.winfo_x() + r.winfo_width() + 10
-        y = r.winfo_y() + r.winfo_height() - top.winfo_height()
+        th = top.winfo_reqheight() + 40                      # 창 제목 줄까지 생각해서 화면 안에 들어오게
+        y = r.winfo_y() + r.winfo_height() - th
         if wa:
-            y = max(wa[1], min(y, wa[3] - top.winfo_height()))
+            y = max(wa[1], min(y, wa[3] - th))
         top.geometry("+%d+%d" % (x, max(0, y)))
         top.lift()
         top.focus_force()
@@ -2446,11 +2476,20 @@ class SettingsWindow:
     def save(self):
         onoff = lambda v: "on" if v.get() else "off"
         before = (self.app.int_cfg("SIZE", MAX_SIZE), self.app.animate_on(), self.app.bg_on())
+        work_end = self.work_end.get().strip()
+        if work_end:
+            hm = parse_hhmm(work_end)
+            if not hm:
+                messagebox.showwarning("설정", "퇴근 시간은 18:00 처럼 적어 주세요.\n(비워 두면 꺼져요)", parent=self.top)
+                return
+            work_end = "%02d:%02d" % hm
         try:
             remind = dict(self.remind_opts).get(self.remind.get(), 10)
             update_settings({"MEMO": self.memo.get(), "SIZE": str(self.size.get()), "ANIMATE": onoff(self.animate),
                              "MOTION": onoff(self.motion), "REMOVE_BG": onoff(self.bg), "GREETING": onoff(self.greet),
-                             "ICAL_URL": self.url.get().strip(), "REMIND_MINUTES": str(remind)})
+                             "ICAL_URL": self.url.get().strip(), "REMIND_MINUTES": str(remind),
+                             "CLOCK": onoff(self.clock), "CLOCK_STYLE": self.clock_style.get(),
+                             "WORK_END": work_end, "HOURLY_CHIME": onoff(self.chime)})
         except Exception as ex:
             messagebox.showerror("설정", "설정을 저장하지 못했어요: %s" % ex, parent=self.top)
             return
@@ -2459,6 +2498,10 @@ class SettingsWindow:
         old_urls = list(self.app.urls)
         self.app.load_config()
         self.app.motion = self.app.cfg.get("MOTION", "on").lower() != "off"
+        if self.app.clock_on():
+            self.app.show_clock()
+        else:
+            self.app.hide_clock()
         self.close()
         if self.app.urls and self.app.urls != old_urls:
             self.app.root.after(1500, lambda: self.app.refresh(True))
@@ -2473,6 +2516,138 @@ class SettingsWindow:
             self.top.destroy()
         except Exception:
             pass
+
+
+WEEKDAYS_KO = "월화수목금토일"
+
+
+def parse_hhmm(text):
+    """'18:00', '18시', '18시 30분', '9:5' → (시, 분). 비었거나 이상하면 None."""
+    m = re.fullmatch(r"\s*(\d{1,2})\s*(?:[:：시]\s*(\d{1,2})?\s*분?)?\s*", text or "")
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2) or 0)
+    return (h, mi) if 0 <= h < 24 and 0 <= mi < 60 else None
+
+
+class ClockCard:
+    """캐릭터 옆에 붙어 다니는 작은 시계 카드 (디지털/아날로그, 날짜, 퇴근·집중 타이머 한 줄)."""
+    FILL = "#fffdf6"
+
+    def __init__(self, app):
+        self.app = app
+        self.alive = True
+        top = self.top = tk.Toplevel(app.root)
+        configure_overlay(top)
+        self.c = tk.Canvas(top, bg=WINDOW_BG, highlightthickness=0, bd=0, cursor="fleur")
+        self.c.pack()
+        self.w = self.h = 0
+        self.down = None
+        self.c.bind("<ButtonPress-1>", self.on_down)
+        self.c.bind("<B1-Motion>", self.on_move)
+        self.c.bind("<ButtonRelease-1>", self.on_up)
+        for event in CONTEXT_EVENTS:
+            self.c.bind(event, app.on_menu)
+        self.draw()
+        if MAC:
+            top.deiconify()
+
+    def draw(self):
+        if not self.alive:
+            return
+        app, c = self.app, self.c
+        now = datetime.now()
+        status, icon = app.clock_status(now)
+        analog = app.cfg.get("CLOCK_STYLE", "digital").lower() == "analog"
+        c.delete("all")
+        W = 156
+        y = 10
+        if analog:
+            face = 86
+            H = y + face + 8 + 18 + (26 if status else 0) + 8
+        else:
+            H = y + 36 + 18 + (26 if status else 0) + 10
+        round_rect(c, 2, 2, W - 3, H - 3, 16, fill=self.FILL, outline=LINE, width=2)
+        if analog:
+            cx, cy, r = W // 2, y + face // 2, face // 2
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#fff4dc", outline=LINE, width=2)
+            for k in range(12):
+                a = math.radians(k * 30)
+                r1 = r - (9 if k % 3 == 0 else 6)
+                c.create_line(cx + math.sin(a) * r1, cy - math.cos(a) * r1,
+                              cx + math.sin(a) * (r - 3), cy - math.cos(a) * (r - 3),
+                              fill=LINE, width=2 if k % 3 == 0 else 1)
+
+            def hand(angle, length, width, color):
+                a = math.radians(angle)
+                c.create_line(cx, cy, cx + math.sin(a) * length, cy - math.cos(a) * length,
+                              fill=color, width=width, capstyle="round")
+            hand((now.hour % 12 + now.minute / 60.0) * 30, r * 0.5, 4, TEXT)
+            hand((now.minute + now.second / 60.0) * 6, r * 0.75, 3, TEXT)
+            hand(now.second * 6, r * 0.8, 1, "#f08078")
+            c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, fill="#f08078", outline="")
+            y += face + 8
+        else:
+            c.create_text(W // 2, y + 18, text=now.strftime("%H:%M"), font=(FONT_FAMILY, 22, "bold"), fill=TEXT)
+            y += 36
+        c.create_text(W // 2, y + 8, text="%d월 %d일 %s요일" % (now.month, now.day, WEEKDAYS_KO[now.weekday()]),
+                      font=(FONT_FAMILY, 9), fill="#8a7360")
+        y += 18
+        if status:
+            c.create_line(16, y + 2, W - 16, y + 2, fill="#e6d6bf", dash=(3, 3))
+            img = ui_icon(icon) if icon else None
+            tid = c.create_text(W // 2, y + 14, text=status, font=(FONT_FAMILY, 9, "bold"), fill=TEXT)
+            if img:
+                x1, _, x2, _ = c.bbox(tid)
+                tw = x2 - x1
+                c.coords(tid, W // 2 + 11, y + 14)
+                c.create_image(W // 2 - tw // 2 - 4, y + 14, image=img)
+        if (W, H) != (self.w, self.h):
+            self.w, self.h = W, H
+            c.config(width=W, height=H)
+            self.place()
+
+    def default_offset(self):
+        r = self.app.root
+        return -self.w - 6, r.winfo_height() - self.h - 8
+
+    def place(self):
+        if not self.alive or self.down:
+            return
+        r = self.app.root
+        off = self.app.state.get("clock_offset")
+        dx, dy = off if isinstance(off, list) and len(off) == 2 else self.default_offset()
+        x, y = r.winfo_x() + int(dx), r.winfo_y() + int(dy)
+        vs = virtual_screen() or (0, 0, r.winfo_screenwidth(), r.winfo_screenheight())
+        if x < vs[0] + 4 and not isinstance(off, list):       # 왼쪽에 자리가 없으면 오른쪽에
+            x = r.winfo_x() + r.winfo_width() + 6
+        x = max(vs[0] + 4, min(x, vs[2] - self.w - 4))
+        y = max(vs[1] + 4, min(y, vs[3] - self.h - 4))
+        self.top.geometry("%dx%d+%d+%d" % (self.w, self.h, x, y))
+
+    def on_down(self, e):
+        self.down = (e.x_root, e.y_root, self.top.winfo_x(), self.top.winfo_y())
+
+    def on_move(self, e):
+        if self.down:
+            self.top.geometry("+%d+%d" % (self.down[2] + e.x_root - self.down[0],
+                                          self.down[3] + e.y_root - self.down[1]))
+
+    def on_up(self, _e):
+        if not self.down:
+            return
+        self.down = None
+        r = self.app.root
+        self.app.state["clock_offset"] = [self.top.winfo_x() - r.winfo_x(), self.top.winfo_y() - r.winfo_y()]
+        save_state(self.app.state)
+
+    def close(self):
+        if self.alive:
+            self.alive = False
+            try:
+                self.top.destroy()
+            except Exception:
+                pass
 
 
 class Memo:
@@ -2634,6 +2809,10 @@ class App:
         self.root.after(10 * 60 * 1000, self.season_check)
         self.next_random = time.time() + self.random_minutes() * 60
         r.after(60 * 1000, self.random_tick)
+        self.clock, self.focus, self.chimed = None, None, None
+        if self.clock_on():
+            r.after(600, self.show_clock)
+        r.after(1000, self.clock_tick)
         self.uq = queue.Queue()
         self.update_busy = False
         if not MAC:
@@ -2949,6 +3128,8 @@ class App:
         self.root.geometry("+%d+%d" % (self.down[2] + dx, self.down[3] + dy))
         if self.bubble:
             self.bubble.place()
+        if self.clock and self.clock.alive:
+            self.clock.place()
 
     def on_up(self, _e):
         if not self.down:
@@ -3038,6 +3219,129 @@ class App:
             return True
         self.say("캐릭터 바꾸기·꾸미기 창을 닫으면\n바꿀 수 있어요!", 5, False)
         return False
+
+    # ---------- clock / work-end / focus timer (1.7)
+    def clock_on(self):
+        return self.cfg.get("CLOCK", "off").lower() in ("on", "1", "yes", "true")
+
+    def set_clock_on(self, want):
+        try:
+            update_settings({"CLOCK": "on" if want else "off"})
+        except Exception as ex:
+            log("clock setting: %s" % ex)
+        self.cfg["CLOCK"] = "on" if want else "off"
+        if want:
+            self.show_clock()
+        else:
+            self.hide_clock()
+
+    def show_clock(self):
+        if not (self.clock and self.clock.alive):
+            self.clock = ClockCard(self)
+
+    def hide_clock(self):
+        if self.clock and not self.focus:                    # 집중 타이머 중에는 계속 보여요
+            self.clock.close()
+            self.clock = None
+
+    def work_end(self):
+        return parse_hhmm(self.cfg.get("WORK_END", ""))
+
+    def focus_count(self):
+        today = str(date.today())
+        return self.state.get("focus_count", 0) if self.state.get("focus_day") == today else 0
+
+    def clock_status(self, now):
+        """시계 카드 맨 아래 한 줄: (글자, 아이콘) 또는 (None, None)."""
+        if self.focus:
+            left = max(0, int(self.focus["end"] - time.time() + 0.999))
+            label = "집중" if self.focus["mode"] == "focus" else "쉬는 시간"
+            return "%s %02d:%02d" % (label, left // 60, left % 60), ("timer" if self.focus["mode"] == "focus" else "clock")
+        end = self.work_end()
+        if end and now.weekday() < 5:
+            mins = (end[0] * 60 + end[1]) - (now.hour * 60 + now.minute)
+            if mins > 0:
+                h, m = divmod(mins, 60)
+                return ("퇴근까지 %d시간 %d분" % (h, m) if h else "퇴근까지 %d분" % m), "clock"
+            if mins > -60:
+                return "퇴근 시간이에요!", "clock"
+        n = self.focus_count()
+        if n:
+            return "오늘 집중 %d번 했어요" % n, "timer"
+        return None, None
+
+    def toggle_focus(self):
+        if self.focus:
+            self.stop_focus()
+        else:
+            self.start_focus()
+
+    def start_focus(self):
+        if self.bubble and self.bubble.alive and self.bubble.has_buttons:
+            self.bubble.close()
+        mins = max(1, self.int_cfg("FOCUS_MINUTES", 25))
+        self.focus = {"mode": "focus", "end": time.time() + mins * 60}
+        self.show_clock()
+        self.say("%d분 집중 시작!\n다 되면 알려줄게요 ✿" % mins, 4)
+
+    def start_break(self):
+        if self.bubble and self.bubble.alive:
+            self.bubble.close()
+        mins = max(1, self.int_cfg("BREAK_MINUTES", 5))
+        self.focus = {"mode": "break", "end": time.time() + mins * 60}
+        self.show_clock()
+        self.say("%d분 쉬어요~ 기지개 쭉!" % mins, 4)
+
+    def stop_focus(self, quiet=False):
+        if self.bubble and self.bubble.alive and self.bubble.has_buttons:
+            self.bubble.close()
+        self.focus = None
+        if not self.clock_on():
+            self.hide_clock()
+        if not quiet:
+            self.say("집중 타이머를 멈췄어요.", 3, False)
+
+    def focus_finished(self):
+        mode = self.focus["mode"]
+        self.focus = None
+        if mode == "focus":
+            today = str(date.today())
+            self.state["focus_count"] = self.focus_count() + 1
+            self.state["focus_day"] = today
+            save_state(self.state)
+            self.say("집중 끝! 잘했어요 ✿ (오늘 %d번)\n%d분 쉬었다 할까요?"
+                     % (self.state["focus_count"], max(1, self.int_cfg("BREAK_MINUTES", 5))), 0,
+                     buttons=[("그만할래요", lambda: self.stop_focus(quiet=True), False), ("쉬기", self.start_break, True)])
+        else:
+            self.say("쉬는 시간 끝!\n다시 집중해 볼까요?", 0,
+                     buttons=[("그만할래요", lambda: self.stop_focus(quiet=True), False),
+                              ("한 번 더", self.start_focus, True)])
+
+    def clock_tick(self):
+        try:
+            now = datetime.now()
+            if self.focus and time.time() >= self.focus["end"]:
+                self.focus_finished()
+            end = self.work_end()
+            today = str(date.today())
+            if end and now.weekday() < 5 and self.state.get("work_end_said") != today:
+                mins = (now.hour * 60 + now.minute) - (end[0] * 60 + end[1])
+                if 0 <= mins < 60 and not self.bubble_busy():
+                    self.state["work_end_said"] = today
+                    save_state(self.state)
+                    self.say("퇴근 시간이에요!\n오늘도 정말 수고했어요 ✿", 12)
+            if (self.cfg.get("HOURLY_CHIME", "off").lower() == "on" and now.minute == 0 and 8 <= now.hour <= 22
+                    and self.chimed != (today, now.hour) and not (self.focus and self.focus["mode"] == "focus")
+                    and not self.bubble_busy()):
+                self.chimed = (today, now.hour)
+                h12 = now.hour % 12 or 12
+                self.say(random.choice(["%d시예요! 물 한 잔 마셔요" % h12, "%d시! 잠깐 기지개 켜요" % h12,
+                                        "%d시예요. 눈도 잠깐 쉬어 줘요" % h12]), 6)
+            if self.clock and self.clock.alive:
+                self.clock.draw()
+        except Exception as ex:
+            log("clock: %s" % ex)
+        self.root.after(1000, self.clock_tick)
 
     def random_tick(self):
         try:
